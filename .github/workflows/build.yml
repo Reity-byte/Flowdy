@@ -1,0 +1,40 @@
+name: Build Flowdy
+
+# Tento skript se spustí pouze tehdy, když na GitHubu klikneš na tlačítko "Run workflow"
+on:
+  workflow_dispatch:
+
+jobs:
+  build-tauri:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tady říkáme, jaké systémy chceme použít
+        platform: [macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Stáhnutí kódu
+        uses: actions/checkout@v4
+
+      - name: Instalace Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalace Rustu
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Instalace NPM balíčků
+        run: npm install
+
+      - name: Sestavení Tauri aplikace a vytvoření Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v0.1.0
+          releaseName: 'Flowdy v0.1.0'
+          releaseBody: 'Nová testovací verze aplikace Flowdy pro Mac a Windows.'
+          releaseDraft: true
+          prerelease: false

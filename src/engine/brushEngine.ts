@@ -1,0 +1,433 @@
+// src/engine/brushEngine.ts
+import type { BrushSettings, Point, PointerBrushSample } from "./brushTypes";
+
+export type BrushEngineTuning = {
+  stabilization: number;
+  predictionMs: number;
+  predictionBlend: number;
+  velocityThinning: number;
+  referenceSpeed: number;
+  minWidthScale: number;
+  pressureCurveGamma: number;
+  smoothingWindow: number;
+};
+
+export const DEFAULT_BRUSH_TUNING: BrushEngineTuning = {
+  stabilization: 0.35,
+  predictionMs: 22,
+  predictionBlend: 0.45,
+  velocityThinning: 0.4, 
+  referenceSpeed: 2000,
+  minWidthScale: 0.15,
+  pressureCurveGamma: 0.85,
+  smoothingWindow: 10,
+};
+
+function parseHexColor(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace("#", "").trim();
+  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const n = parseInt(full, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function normalizedPressure(sample: PointerBrushSample): number {
+  if (sample.pointerType === "pen" && sample.pressure > 0 && sample.pressure <= 1) {
+    return sample.pressure;
+  }
+  return 1;
+}
+
+export function applyPressureCurve(normalized: number, gamma: number): number {
+  const g = Math.max(0.2, Math.min(3, gamma));
+  return Math.pow(Math.min(1, Math.max(0, normalized)), g);
+}
+
+function hypot(dx: number, dy: number): number {
+  return Math.hypot(dx, dy);
+}
+
+function velocityWidthScale(speedPxPerSec: number, tuning: BrushEngineTuning): number {
+  if (tuning.velocityThinning <= 0) return 1;
+  const u = Math.min(1, speedPxPerSec / Math.max(1, tuning.referenceSpeed));
+  const thin = tuning.minWidthScale;
+  const k = tuning.velocityThinning;
+  return 1 - k * u * (1 - thin);
+}
+
+export function paintDab(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  settings: BrushSettings,
+  sizeScale = 1,
+  opacityScale = 1,
+  activeColor?: { r: number, g: number, b: number }
+): void {
+  const effSize = settings.size * sizeScale;
+  
+  // OPRAVA 1: Povolíme kreslení až do miniaturních 0.1px pro vytvoření dokonale ostré špičky
+  if (effSize < 0.1) return; 
+
+  // Hard Pen ignoruje Hardness slider a je vždy 100% ostrý
+  const hardness = settings.brushStyle === "pen" ? 1 : Math.min(1, Math.max(0, settings.hardness));
+  const radius = Math.max(0.1, effSize / 2);
+  
+  const baseOpacity = Math.min(1, Math.max(0, settings.opacity));
+  const dabOpacity = baseOpacity * settings.intensity * opacityScale * 0.4;
+
+  const innerStop = hardness;
+  const innerAlpha = dabOpacity;
+  const outerAlpha = dabOpacity * (1 - hardness);
+
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  if (settings.brushStyle === "marker") {
+    ctx.rotate(Math.PI / 4);
+    ctx.scale(1, 0.3);
+  }
+
+  if (settings.isEraser) {
+    ctx.globalCompositeOperation = "destination-out";
+    g.addColorStop(0, `rgba(0,0,0,${innerAlpha})`);
+    g.addColorStop(innerStop, `rgba(0,0,0,${innerAlpha})`);
+    g.addColorStop(1, `rgba(0,0,0,${outerAlpha})`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  ctx.globalCompositeOperation = settings.brushStyle === "marker" ? "multiply" : "source-over";
+
+  const { r, g: gv, b } = activeColor || parseHexColor(settings.color);
+  g.addColorStop(0, `rgba(${Math.round(r)},${Math.round(gv)},${Math.round(b)},${innerAlpha})`);
+  g.addColorStop(innerStop, `rgba(${Math.round(r)},${Math.round(gv)},${Math.round(b)},${innerAlpha})`);
+  g.addColorStop(1, `rgba(${Math.round(r)},${Math.round(gv)},${Math.round(b)},${outerAlpha})`);
+  
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fill();
+  
+  ctx.restore();
+}
+
+function stampAlongSegment(
+  ctx: CanvasRenderingContext2D,
+  from: Point,
+  to: Point,
+  settings: BrushSettings,
+  pressureScale: number,
+  velocityScale: number,
+  currentLength: number,
+  updateLength: (newLen: number) => void,
+  wetColor?: { r: number, g: number, b: number }
+): void {
+  const dist = hypot(to.x - from.x, to.y - from.y);
+  const effSize = settings.size * pressureScale * velocityScale;
+  
+  const spacing = Math.max(0.1, effSize * 0.03); 
+  const steps = Math.max(1, Math.ceil(dist / spacing));
+  const sizeMul = pressureScale * velocityScale;
+
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const x = from.x + (to.x - from.x) * t;
+    const y = from.y + (to.y - from.y) * t;
+    const dabLength = currentLength + dist * t;
+
+    let taper = 1;
+    if (settings.startTaper > 0 && dabLength < settings.startTaper) {
+      const ratio = dabLength / settings.startTaper;
+      // OPRAVA 2: Začíná přesně na velikosti 0 a roste k 1
+      taper = Math.pow(ratio, 1.5); 
+    }
+
+    // OPRAVA 3: Průhlednost (předposlední parametr) držíme na 1, aby nevznikly korálky na začátku tahu
+    paintDab(ctx, x, y, settings, sizeMul * taper, 1, wetColor);
+  }
+  updateLength(currentLength + dist);
+}
+
+function quadPoint(p0: Point, p1: Point, p2: Point, t: number): Point {
+  const u = 1 - t;
+  return {
+    x: u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x,
+    y: u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y,
+  };
+}
+
+function quadLength(p0: Point, p1: Point, p2: Point, segments = 12): number {
+  let len = 0;
+  let prev = p0;
+  for (let i = 1; i <= segments; i++) {
+    const p = quadPoint(p0, p1, p2, i / segments);
+    len += hypot(p.x - prev.x, p.y - prev.y);
+    prev = p;
+  }
+  return len;
+}
+
+function stampAlongQuadratic(
+  ctx: CanvasRenderingContext2D,
+  p0: Point, p1: Point, p2: Point,
+  settings: BrushSettings,
+  pressureScale: number,
+  velocityAtU: (u: number) => number,
+  currentLength: number,
+  updateLength: (newLen: number) => void,
+  wetColor?: { r: number, g: number, b: number }
+): void {
+  const arc = Math.max(1, quadLength(p0, p1, p2, 16));
+  const effBase = settings.size * pressureScale;
+  const spacing = Math.max(0.1, effBase * 0.03);
+  const steps = Math.max(2, Math.ceil(arc / spacing));
+  
+  let prev = p0;
+  let cl = currentLength;
+
+  for (let i = 1; i <= steps; i++) {
+    const u = i / steps;
+    const p = quadPoint(p0, p1, p2, u);
+    const vs = velocityAtU(u);
+    
+    stampAlongSegment(ctx, prev, p, settings, pressureScale, vs, cl, (nl) => cl = nl, wetColor);
+    prev = p;
+  }
+  updateLength(cl);
+}
+
+export function brushSettingsForTool(
+  base: Omit<BrushSettings, "isEraser">,
+  tool: "brush" | "eraser",
+): BrushSettings {
+  return { ...base, isEraser: tool === "eraser" } as BrushSettings;
+}
+
+function midpoint(a: Point, b: Point): Point {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+export class HighPerformanceBrushStroke {
+  private tuning: BrushEngineTuning;
+  private smooth: Point | null = null;
+  private rawLast: PointerBrushSample | null = null;
+  private vel = { x: 0, y: 0 };
+  private smoothedSpeed = 0; 
+  private lastDrawn: Point | null = null;
+  private strokePoints: Point[] = [];
+  private quadStarted = false;
+  private strokeLength = 0;
+  
+  private wetColor: { r: number, g: number, b: number } | null = null;
+
+  constructor(tuning: Partial<BrushEngineTuning> = {}) {
+    this.tuning = { ...DEFAULT_BRUSH_TUNING, ...tuning };
+  }
+
+  setTuning(tuning: Partial<BrushEngineTuning>): void {
+    this.tuning = { ...this.tuning, ...tuning };
+  }
+
+  reset(): void {
+    this.smooth = null;
+    this.rawLast = null;
+    this.vel = { x: 0, y: 0 };
+    this.smoothedSpeed = 0;
+    this.lastDrawn = null;
+    this.strokePoints = [];
+    this.quadStarted = false;
+    this.strokeLength = 0;
+    this.wetColor = null;
+  }
+
+  down(
+    ctx: CanvasRenderingContext2D,
+    sample: PointerBrushSample,
+    settings: BrushSettings,
+  ): void {
+    this.reset();
+    const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
+    this.smooth = { x: sample.x, y: sample.y };
+    this.rawLast = { ...sample };
+    this.lastDrawn = { ...this.smooth };
+    this.strokePoints.push({ ...this.smooth });
+    
+    this.wetColor = parseHexColor(settings.color);
+    
+    // Na začátku má taper hodnotu téměř 0 pro ostré zapíchnutí do papíru
+    const initialTaper = settings.startTaper > 0 ? 0.001 : 1;
+    paintDab(ctx, this.smooth.x, this.smooth.y, settings, pres * initialTaper, 1, this.wetColor);
+  }
+
+  move(
+    ctx: CanvasRenderingContext2D,
+    sample: PointerBrushSample,
+    settings: BrushSettings,
+  ): void {
+    if (!this.smooth || !this.rawLast || !this.lastDrawn || !this.wetColor) {
+      this.down(ctx, sample, settings);
+      return;
+    }
+
+    const dt = Math.max(1e-3, (sample.t - this.rawLast.t) / 1000);
+    const rdx = sample.x - this.rawLast.x;
+    const rdy = sample.y - this.rawLast.y;
+    this.vel.x = rdx / dt;
+    this.vel.y = rdy / dt;
+    
+    const instantSpeed = hypot(this.vel.x, this.vel.y);
+    this.smoothedSpeed = this.smoothedSpeed * 0.7 + instantSpeed * 0.3;
+
+    const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
+
+    const s = Math.min(0.95, Math.max(0, this.tuning.stabilization));
+    const follow = 1 - Math.pow(1 - s, 0.85);
+    this.smooth.x += (sample.x - this.smooth.x) * follow;
+    this.smooth.y += (sample.y - this.smooth.y) * follow;
+
+    const predT = this.tuning.predictionMs / 1000;
+    const predX = this.smooth.x + this.vel.x * predT * this.tuning.predictionBlend;
+    const predY = this.smooth.y + this.vel.y * predT * this.tuning.predictionBlend;
+    const drawTip: Point = {
+      x: this.smooth.x + (predX - this.smooth.x) * this.tuning.predictionBlend,
+      y: this.smooth.y + (predY - this.smooth.y) * this.tuning.predictionBlend,
+    };
+
+    if (settings.colorMix > 0 && !settings.isEraser) {
+      try {
+        const cx = Math.floor(drawTip.x);
+        const cy = Math.floor(drawTip.y);
+        const pixel = ctx.getImageData(cx, cy, 1, 1).data;
+        
+        if (pixel[3] > 10) { 
+          const mixRate = settings.colorMix * 0.15; 
+          this.wetColor.r += (pixel[0] - this.wetColor.r) * mixRate;
+          this.wetColor.g += (pixel[1] - this.wetColor.g) * mixRate;
+          this.wetColor.b += (pixel[2] - this.wetColor.b) * mixRate;
+        } else {
+          const orig = parseHexColor(settings.color);
+          const restoreRate = 0.02;
+          this.wetColor.r += (orig.r - this.wetColor.r) * restoreRate;
+          this.wetColor.g += (orig.g - this.wetColor.g) * restoreRate;
+          this.wetColor.b += (orig.b - this.wetColor.b) * restoreRate;
+        }
+      } catch(e) {}
+    } else {
+      this.wetColor = parseHexColor(settings.color); 
+    }
+
+    this.strokePoints.push(drawTip);
+    const maxPts = Math.max(6, Math.floor(this.tuning.smoothingWindow));
+    if (this.strokePoints.length > maxPts) {
+      this.strokePoints.splice(0, this.strokePoints.length - maxPts);
+    }
+
+    const vScale = velocityWidthScale(this.smoothedSpeed, this.tuning);
+    const pts = this.strokePoints;
+    const n = pts.length;
+
+    const updateLen = (l: number) => { this.strokeLength = l; };
+
+    if (n === 2) {
+      const p0 = pts[0]!;
+      const p1 = pts[1]!;
+      stampAlongSegment(ctx, p0, p1, settings, pres, vScale, this.strokeLength, updateLen, this.wetColor);
+      this.lastDrawn = midpoint(p0, p1);
+    } else if (n >= 3) {
+      const pA = pts[n - 3]!;
+      const pB = pts[n - 2]!;
+      const pC = pts[n - 1]!;
+      const start = midpoint(pA, pB);
+      const end = midpoint(pB, pC);
+      const ld = this.lastDrawn;
+
+      if (!this.quadStarted) {
+        if (ld && hypot(ld.x - start.x, ld.y - start.y) > 0.25) {
+          stampAlongSegment(ctx, ld, start, settings, pres, vScale, this.strokeLength, updateLen, this.wetColor);
+        }
+        stampAlongQuadratic(ctx, start, pB, end, settings, pres, () => vScale, this.strokeLength, updateLen, this.wetColor);
+        this.quadStarted = true;
+      } else {
+        stampAlongQuadratic(ctx, ld!, pB, end, settings, pres, () => vScale, this.strokeLength, updateLen, this.wetColor);
+      }
+      this.lastDrawn = { ...end };
+    }
+
+    this.rawLast = { ...sample };
+  }
+
+  flush(
+    ctx: CanvasRenderingContext2D,
+    sample: PointerBrushSample,
+    settings: BrushSettings,
+  ): void {
+    if (!this.smooth || !this.lastDrawn || !this.wetColor) return;
+    const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
+    const vScale = velocityWidthScale(this.smoothedSpeed, this.tuning);
+
+    // OPRAVA 4: Snížen limit pro spuštění Taperu na rychlost 20 (chytí to i pomalejší odhození pera)
+    if (settings.endTaper > 0 && this.smoothedSpeed > 20) {
+       let dirX = this.vel.x;
+       let dirY = this.vel.y;
+       
+       if (hypot(dirX, dirY) < 10 && this.strokePoints.length >= 3) {
+           const pOld = this.strokePoints[this.strokePoints.length - 3];
+           const pNew = this.strokePoints[this.strokePoints.length - 1];
+           dirX = (pNew.x - pOld.x) / 0.016;
+           dirY = (pNew.y - pOld.y) / 0.016;
+       }
+
+       const dirLen = hypot(dirX, dirY) || 1;
+       const normX = dirX / dirLen;
+       const normY = dirY / dirLen;
+
+       const actualTail = Math.min(settings.endTaper, this.smoothedSpeed * 0.2);
+       
+       if (actualTail > 2) {
+           let currentDist = 0;
+           
+           while (currentDist < actualTail) {
+               const t = currentDist / actualTail;
+               
+               // Ztenčení velikosti do dokonale ostré špičky
+               const sizeTaper = Math.pow(1 - t, 1.5);
+               const currentSize = settings.size * pres * vScale * sizeTaper;
+               
+               // Kreslíme, dokud nemá tečka průměr 0.1 pixelu (úplná špička jehly)
+               if (currentSize < 0.1) break;
+
+               const spacing = Math.max(0.1, currentSize * 0.03);
+               
+               const tx = this.lastDrawn.x + normX * currentDist;
+               const ty = this.lastDrawn.y + normY * currentDist;
+               
+               // OPRAVA 5: Zabraňuje korálkování! Posíláme opacityScale=1.
+               paintDab(ctx, tx, ty, settings, pres * vScale * sizeTaper, 1, this.wetColor);
+               
+               currentDist += spacing;
+           }
+       }
+    } else {
+      const end = { x: sample.x, y: sample.y };
+      if (hypot(end.x - this.lastDrawn.x, end.y - this.lastDrawn.y) > 0.1) {
+        stampAlongSegment(ctx, this.lastDrawn, end, settings, pres, vScale, this.strokeLength, (l) => this.strokeLength = l, this.wetColor);
+      }
+      paintDab(ctx, end.x, end.y, settings, pres * vScale, 1, this.wetColor);
+    }
+  }
+}
+
+export function paintStrokeSegment(
+  ctx: CanvasRenderingContext2D,
+  from: Point,
+  to: Point,
+  settings: BrushSettings,
+): void {
+  stampAlongSegment(ctx, from, to, settings, 1, 1, 0, () => {});
+}

@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* VÝCHOZÍ / RŮŽOVÉ TÉMA (Podle tvého obrázku) */
+:root, html[data-theme="pink"] {
+  --shell-bg: #5A113C;      /* Tmavě švestková/fialová (Pozadí) */
+  --shell-panel: #FF66B2;   /* Zářivě růžová (Panely a modální okna) */
+  --shell-accent: #FF007F;  /* Výrazná sytá růžová (Aktivní tlačítka) */
+  --shell-border: #FF3399;  /* Růžová pro ohraničení linek */
+  --shell-text: #FFFFFF;    /* Bílý text pro perfektní čitelnost na tmavém pozadí */
+}
+
+/* TMAVÉ TÉMA */
+html[data-theme="dark"] {
+  --shell-bg: #11111b;
+  --shell-panel: #181825;
+  --shell-accent: #89b4fa;
+  --shell-border: #313244;
+  --shell-text: #cdd6f4;
+}
+
+/* SVĚTLÉ TÉMA */
+html[data-theme="light"] {
+  --shell-bg: #f8f9fa;
+  --shell-panel: #ffffff;
+  --shell-accent: #3b82f6;
+  --shell-border: #e2e8f0;
+  --shell-text: #0f172a;    /* Téměř černá písmenka pro čitelnost */
+}
+
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  color: var(--shell-text);
+  background-color: var(--shell-bg);
+  @apply antialiased transition-colors duration-300;
+}

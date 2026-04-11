@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window: core APIs, native save dialog, custom save command","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-save"]}}
