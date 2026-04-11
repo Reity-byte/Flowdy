@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, windows-latest, ubuntu-latest]
+        platform: [ubuntu-latest]
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -22,11 +22,8 @@ jobs:
 
       - name: Instalace Rustu
         uses: dtolnay/rust-toolchain@stable
-
-      # TENTO KROK PŘIDÁVÁME - Instalace Android komponent do Rustu
-      - name: Instalace Rust Android Targets
-        if: matrix.platform == 'ubuntu-latest'
-        run: rustup target add aarch64-linux-android
+        with:
+          targets: ${{ matrix.platform == 'ubuntu-latest' && 'aarch64-linux-android' || '' }}
 
       - name: Instalace Javy a Android SDK
         if: matrix.platform == 'ubuntu-latest'
@@ -42,6 +39,7 @@ jobs:
       - name: Instalace NPM balíčků
         run: npm install
 
+      # Vytvoříme konfigurační soubory pro Android, pokud neexistují
       - name: Tauri Android Init
         if: matrix.platform == 'ubuntu-latest'
         run: npx tauri android init
@@ -50,10 +48,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tady říkáme linkeru, kde má hledat Android nástroje
+          NDK_HOME: ${{ steps.setup-android.outputs.ndk-path }}
         with:
-          tagName: v0.2.2
-          releaseName: 'Flowdy v0.2.2'
-          releaseBody: 'Oprava Android targets.'
+          tagName: v0.2.3
+          releaseName: 'Flowdy v0.2.3'
+          releaseBody: 'Snad už finální oprava linkeru pro Android.'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
