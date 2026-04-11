@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-latest]
+        platform: [macos-latest, windows-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -22,8 +22,11 @@ jobs:
 
       - name: Instalace Rustu
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'ubuntu-latest' && 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android' || '' }}
+
+      # TENTO KROK PŘIDÁVÁME - Instalace Android komponent do Rustu
+      - name: Instalace Rust Android Targets
+        if: matrix.platform == 'ubuntu-latest'
+        run: rustup target add aarch64-linux-android
 
       - name: Instalace Javy a Android SDK
         if: matrix.platform == 'ubuntu-latest'
@@ -32,7 +35,6 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      # TENTO KROK PŘIDÁVÁME - Potvrzení licencí pro Android
       - name: Accept Android Licenses
         if: matrix.platform == 'ubuntu-latest'
         run: yes | sdkmanager --licenses || true
@@ -49,9 +51,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.2.1
-          releaseName: 'Flowdy v0.2.1'
-          releaseBody: 'Oprava Android buildu - licence.'
+          tagName: v0.2.2
+          releaseName: 'Flowdy v0.2.2'
+          releaseBody: 'Oprava Android targets.'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
