@@ -1,4 +1,4 @@
-name: Build Flowdy (Multiplatform)
+name: Build Flowdy
 
 on:
   workflow_dispatch:
@@ -8,7 +8,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Přidali jsme ubuntu-latest pro sestavení Androidu
         platform: [macos-latest, windows-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.platform }}
@@ -23,23 +22,36 @@ jobs:
 
       - name: Instalace Rustu
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'ubuntu-latest' && 'aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android' || '' }}
 
-      # Speciální krok jen pro Android (běží na Ubuntu)
-      - name: Instalace Android SDK
+      - name: Instalace Javy a Android SDK
         if: matrix.platform == 'ubuntu-latest'
-        uses: android-actions/setup-android@v3
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      # TENTO KROK PŘIDÁVÁME - Potvrzení licencí pro Android
+      - name: Accept Android Licenses
+        if: matrix.platform == 'ubuntu-latest'
+        run: yes | sdkmanager --licenses || true
 
       - name: Instalace NPM balíčků
         run: npm install
+
+      - name: Tauri Android Init
+        if: matrix.platform == 'ubuntu-latest'
+        run: npx tauri android init
 
       - name: Sestavení aplikací
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.2.0
-          releaseName: 'Flowdy v0.2.0'
+          tagName: v0.2.1
+          releaseName: 'Flowdy v0.2.1'
+          releaseBody: 'Oprava Android buildu - licence.'
           releaseDraft: true
           prerelease: false
-          # Tady říkáme, co se má na které platformě stavět
           args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
