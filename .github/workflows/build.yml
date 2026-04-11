@@ -25,20 +25,19 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'ubuntu-latest' && 'aarch64-linux-android' || '' }}
 
-      # NASTAVENÍ ANDROIDU (Změna: používáme ověřenou akci pro nastavení NDK)
-      - name: Setup Android NDK
-        if: matrix.platform == 'ubuntu-latest'
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c # Stabilní verze pro Tauri
-
-      - name: Instalace Javy
+      - name: Instalace Javy a Android SDK
         if: matrix.platform == 'ubuntu-latest'
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
+
+      - name: Setup Android NDK
+        if: matrix.platform == 'ubuntu-latest'
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
 
       - name: Accept Android Licenses
         if: matrix.platform == 'ubuntu-latest'
@@ -47,21 +46,15 @@ jobs:
       - name: Instalace NPM balíčků
         run: npm install
 
-      - name: Tauri Android Init
-        if: matrix.platform == 'ubuntu-latest'
-        run: npx tauri android init
-
       - name: Sestavení aplikací
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Tato proměnná je klíčová pro linker v Rustu
-          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # Tato část přidá Android nástroje do cesty, aby je Rust viděl
+          PATH: ${{ matrix.platform == 'ubuntu-latest' && format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin:{1}', steps.setup-ndk.outputs.ndk-path, env.PATH) || env.PATH }}
         with:
-          tagName: v0.2.4
-          releaseName: 'Flowdy v0.2.4'
-          releaseBody: 'Android Build s fixnutým NDK Toolchainem.'
+          tagName: v0.2.5
+          releaseName: 'Flowdy v0.2.5'
           releaseDraft: true
           prerelease: false
-          # Přidali jsme argument, který vynutí správný linker
           args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
