@@ -1,6 +1,5 @@
-name: Build Flowdy
+name: Build Flowdy (Multiplatform)
 
-# Tento skript se spustí pouze tehdy, když na GitHubu klikneš na tlačítko "Run workflow"
 on:
   workflow_dispatch:
 
@@ -9,8 +8,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Tady říkáme, jaké systémy chceme použít
-        platform: [macos-latest, windows-latest]
+        # Přidali jsme ubuntu-latest pro sestavení Androidu
+        platform: [macos-latest, windows-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -25,16 +24,22 @@ jobs:
       - name: Instalace Rustu
         uses: dtolnay/rust-toolchain@stable
 
+      # Speciální krok jen pro Android (běží na Ubuntu)
+      - name: Instalace Android SDK
+        if: matrix.platform == 'ubuntu-latest'
+        uses: android-actions/setup-android@v3
+
       - name: Instalace NPM balíčků
         run: npm install
 
-      - name: Sestavení Tauri aplikace a vytvoření Release
+      - name: Sestavení aplikací
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.1.0
-          releaseName: 'Flowdy v0.1.0'
-          releaseBody: 'Nová testovací verze aplikace Flowdy pro Mac a Windows.'
+          tagName: v0.2.0
+          releaseName: 'Flowdy v0.2.0'
           releaseDraft: true
           prerelease: false
+          # Tady říkáme, co se má na které platformě stavět
+          args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
