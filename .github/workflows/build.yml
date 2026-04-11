@@ -77,7 +77,7 @@ jobs:
         run: npx tauri android init
 
       - name: Sestavení Android APK
-        run: npx tauri android build
+        run: npx tauri android build --debug
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
