@@ -46,14 +46,16 @@ jobs:
       - name: Instalace NPM balíčků
         run: npm install
 
+      # Tady je ta změna: Cestu k linkeru přidáme přímo do PATH v rámci shellu
       - name: Sestavení aplikací
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.2.6
-          releaseName: 'Flowdy v0.2.6'
+          tagName: v0.2.7
+          releaseName: 'Flowdy v0.2.7'
           releaseDraft: true
           prerelease: false
-          # Změna: PATH nastavujeme přímo v argumentu pro Linux, aby se nepoškodilo globální ENV
-          args: ${{ matrix.platform == 'ubuntu-latest' && format('--target aarch64-linux-android --bundle-path-env PATH={0}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH', steps.setup-ndk.outputs.ndk-path) || '' }}
+          args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
+          # Tato funkce v tauri-action umožní upravit prostředí před buildem
+          beforeBuildCommand: ${{ matrix.platform == 'ubuntu-latest' && format('export PATH="{0}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"', steps.setup-ndk.outputs.ndk-path) || '' }}
