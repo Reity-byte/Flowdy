@@ -1,78 +1,138 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
+import { useHistoryStore } from "../stores/historyStore";
 import { useAppStore } from "../stores/appStore";
 import { useEditorStore, BRUSH_PRESETS, PresetId } from "../stores/editorStore";
+import { documentEngineRef } from "../engine/documentEngineRef";
 
 export function TopBar() {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  const undo = useHistoryStore((s) => s.undo);
+  const redo = useHistoryStore((s) => s.redo);
+  const canUndo = useHistoryStore((s) => s.canUndo());
+  const canRedo = useHistoryStore((s) => s.canRedo());
+
+  const saveProject = useAppStore((s) => s.saveCurrentProject);
   const openGallery = useAppStore((s) => s.openGallery);
+
   const tool = useEditorStore((s) => s.tool);
   const setTool = useEditorStore((s) => s.setTool);
-  const activePresetId = useEditorStore((s) => s.activePresetId);
   const loadPreset = useEditorStore((s) => s.loadPreset);
+  const activePresetId = useEditorStore((s) => s.activePresetId);
 
-  const [isBrushMenuOpen, setIsBrushMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const handleUndo = () => {
+    const snap = undo();
+    if (snap && documentEngineRef.current) {
+      documentEngineRef.current.restoreSnapshot(snap);
+    }
+  };
 
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setIsBrushMenuOpen(false);
-      }
-    };
-    if (isBrushMenuOpen) document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isBrushMenuOpen]);
+  const handleRedo = () => {
+    const snap = redo();
+    if (snap && documentEngineRef.current) {
+      documentEngineRef.current.restoreSnapshot(snap);
+    }
+  };
+
+  const handleExportPNG = async () => {
+    if (!documentEngineRef.current) return;
+    const blob = await documentEngineRef.current.exportAsBlob();
+    if (!blob) return;
+    
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "flowdy-artwork.png";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between border-b border-shell-border bg-shell-panel px-4 relative">
-      <div className="flex items-center gap-4">
-         <button onClick={openGallery} className="text-sm font-semibold text-shell-text opacity-80 hover:opacity-100 transition">← Gallery</button>
-         <h1 className="font-bold text-shell-text text-lg">Flowdy</h1>
+    <div className="flex gap-2 p-2 bg-shell-bg border-b border-shell-border items-center justify-between">
+      
+      {/* LEVÁ ČÁST */}
+      <div className="flex gap-2 w-1/3">
+        <button onClick={openGallery} className="px-3 py-1 rounded hover:bg-shell-panel transition-colors">
+          🖼 Galerie
+        </button>
+        <button onClick={() => saveProject()} className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors">
+          💾 Uložit
+        </button>
+        <button onClick={handleExportPNG} className="px-3 py-1 rounded hover:bg-shell-panel transition-colors">
+          ⬇ Export PNG
+        </button>
       </div>
 
-      <div className="flex items-center gap-2 bg-shell-bg p-1 rounded-lg border border-shell-border">
-         <button onClick={() => setTool("brush")} className={`px-4 py-1 text-sm rounded-md transition ${tool === "brush" ? "bg-shell-accent text-white" : "text-shell-text opacity-70 hover:opacity-100"}`}>Brush</button>
-         <button onClick={() => setTool("eraser")} className={`px-4 py-1 text-sm rounded-md transition ${tool === "eraser" ? "bg-shell-accent text-white" : "text-shell-text opacity-70 hover:opacity-100"}`}>Eraser</button>
-         
-         <div className="w-px h-5 bg-shell-border mx-1"></div>
-         
-         <div className="relative" ref={menuRef}>
-           <button 
-             onClick={() => setIsBrushMenuOpen(!isBrushMenuOpen)}
-             className="flex items-center gap-2 px-3 py-1 text-sm font-medium text-shell-text opacity-80 hover:opacity-100 rounded hover:bg-shell-border/50 transition"
-           >
-             {BRUSH_PRESETS[activePresetId].name}
-             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg>
-           </button>
+      {/* PROSTŘEDNÍ ČÁST (Nástroje a profi menu) */}
+      <div className="flex gap-3 items-center justify-center w-1/3 relative">
+        <div className="flex gap-1 bg-shell-panel p-1 rounded-lg">
+          <button
+            onClick={() => setTool("brush")}
+            className={`px-4 py-1 rounded transition-colors ${
+              tool === "brush" ? "bg-blue-600 text-white shadow" : "hover:bg-shell-bg"
+            }`}
+          >
+            🖌 Štětec
+          </button>
+          <button
+            onClick={() => setTool("eraser")}
+            className={`px-4 py-1 rounded transition-colors ${
+              tool === "eraser" ? "bg-blue-600 text-white shadow" : "hover:bg-shell-bg"
+            }`}
+          >
+            🧹 Guma
+          </button>
+        </div>
 
-           {isBrushMenuOpen && (
-             <div className="absolute top-full left-0 mt-2 w-80 bg-shell-panel border border-shell-border rounded-xl shadow-2xl overflow-hidden z-50 flex flex-col">
-                {(Object.entries(BRUSH_PRESETS) as [PresetId, typeof BRUSH_PRESETS[PresetId]][]).map(([id, preset]) => (
-                  <button
-                    key={id}
-                    onClick={() => { loadPreset(id); setIsBrushMenuOpen(false); setTool("brush"); }}
-                    className={`flex flex-col gap-1 p-3 text-left transition border-b border-shell-border last:border-0 hover:bg-shell-bg ${activePresetId === id ? 'bg-shell-bg' : ''}`}
-                  >
-                    <div className="w-full h-12 flex items-center justify-center overflow-hidden px-2 mb-1">
-                       {id === "fade-watercolor" && <div className="w-full h-6 rounded-full bg-gradient-to-r from-transparent via-shell-text to-transparent blur-[2px] opacity-50"></div>}
-                       {id === "blurring-marker" && <div className="w-full h-4 bg-gradient-to-r from-transparent via-shell-text to-transparent opacity-60"></div>}
-                       {id === "round-brush" && <div className="w-full h-5 rounded-full bg-gradient-to-r from-transparent via-shell-text to-transparent blur-[1px] opacity-80"></div>}
-                       {id === "felt-tip" && <div className="w-full h-8 rounded-full bg-shell-text"></div>}
-                    </div>
-                    <div className="flex justify-between items-center w-full px-1">
-                      <span className="text-sm font-bold text-shell-text">{preset.name}</span>
-                      <span className="text-sm font-mono text-shell-text opacity-50">{preset.size}.0</span>
-                    </div>
-                  </button>
-                ))}
-             </div>
-           )}
-         </div>
+        {/* Vlastní rozbalovací menu s náhledy */}
+        {tool === "brush" && (
+          <div className="relative">
+            <button
+              onClick={() => setIsMenuOpen(!isMenuOpen)}
+              className="flex items-center gap-2 bg-shell-bg text-sm text-white px-4 py-1.5 rounded-lg border border-shell-border hover:border-blue-500 transition-colors"
+            >
+              {activePresetId ? BRUSH_PRESETS[activePresetId as PresetId].name : "Vlastní nastavení..."}
+              <span className="text-xs ml-2 opacity-60">▼</span>
+            </button>
+
+            {isMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setIsMenuOpen(false)} />
+                <div className="absolute top-full left-0 mt-2 w-64 bg-[#1a1a24] border border-shell-border rounded-lg shadow-2xl z-50 overflow-hidden flex flex-col">
+                  {Object.entries(BRUSH_PRESETS).map(([id, preset]) => (
+                    <button
+                      key={id}
+                      onClick={() => { loadPreset(id as PresetId); setIsMenuOpen(false); }}
+                      className={`flex items-center justify-between px-4 py-3 hover:bg-blue-600/20 transition-colors ${activePresetId === id ? 'bg-blue-600/20 border-l-2 border-blue-500' : 'border-l-2 border-transparent'}`}
+                    >
+                      <span className="text-sm font-medium">{preset.name}</span>
+                      
+                      {/* CSS Vizuální náhled štětce */}
+                      <div className="flex items-center justify-center w-16 h-6">
+                        {id === 'felt-tip' && <div className="w-full h-[2px] bg-white rounded-full opacity-90" />}
+                        {id === 'round-brush' && <div className="w-full h-[6px] bg-white rounded-full opacity-80" />}
+                        {id === 'blurring-marker' && <div className="w-full h-[10px] bg-white rounded-sm opacity-50" />}
+                        {id === 'fade-watercolor' && <div className="w-full h-[14px] bg-gradient-to-r from-transparent via-white to-transparent rounded-full opacity-30" />}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
-      <div className="flex items-center gap-2">
-         <button onClick={() => useAppStore.getState().saveCurrentProject()} className="text-sm px-3 py-1 bg-shell-bg border border-shell-border text-shell-text rounded hover:brightness-95 transition">Save to Gallery</button>
-         <button className="text-sm px-3 py-1 bg-shell-accent text-white rounded hover:brightness-110 transition">Export PNG</button>
+      {/* PRAVÁ ČÁST */}
+      <div className="flex gap-2 w-1/3 justify-end">
+        <button onClick={handleUndo} disabled={!canUndo} className={`px-3 py-1 rounded transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : "hover:bg-shell-panel"}`}>
+          ↩ Zpět
+        </button>
+        <button onClick={handleRedo} disabled={!canRedo} className={`px-3 py-1 rounded transition-colors ${!canRedo ? "opacity-30 cursor-not-allowed" : "hover:bg-shell-panel"}`}>
+          Vpřed ↪
+        </button>
       </div>
-    </header>
-  )
+
+    </div>
+  );
 }

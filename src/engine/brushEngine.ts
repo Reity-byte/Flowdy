@@ -64,16 +64,13 @@ export function paintDab(
   activeColor?: { r: number, g: number, b: number }
 ): void {
   const effSize = settings.size * sizeScale;
-  
-  // OPRAVA 1: Povolíme kreslení až do miniaturních 0.1px pro vytvoření dokonale ostré špičky
   if (effSize < 0.1) return; 
 
-  // Hard Pen ignoruje Hardness slider a je vždy 100% ostrý
   const hardness = settings.brushStyle === "pen" ? 1 : Math.min(1, Math.max(0, settings.hardness));
   const radius = Math.max(0.1, effSize / 2);
   
   const baseOpacity = Math.min(1, Math.max(0, settings.opacity));
-  const dabOpacity = baseOpacity * settings.intensity * opacityScale * 0.4;
+  const dabOpacity = baseOpacity * settings.intensity * opacityScale;
 
   const innerStop = hardness;
   const innerAlpha = dabOpacity;
@@ -131,7 +128,7 @@ function stampAlongSegment(
   const dist = hypot(to.x - from.x, to.y - from.y);
   const effSize = settings.size * pressureScale * velocityScale;
   
-  const spacing = Math.max(0.1, effSize * 0.03); 
+  const spacing = Math.max(0.5, effSize * 0.1); 
   const steps = Math.max(1, Math.ceil(dist / spacing));
   const sizeMul = pressureScale * velocityScale;
 
@@ -144,11 +141,15 @@ function stampAlongSegment(
     let taper = 1;
     if (settings.startTaper > 0 && dabLength < settings.startTaper) {
       const ratio = dabLength / settings.startTaper;
-      // OPRAVA 2: Začíná přesně na velikosti 0 a roste k 1
       taper = Math.pow(ratio, 1.5); 
+    } else {
+      // OCHRANA PROTI BLOBŮM: Zajišťuje ostrý a plynulý začátek
+      const introDist = Math.max(2, settings.size * 0.25);
+      if (dabLength < introDist) {
+        taper = 0.2 + 0.8 * (dabLength / introDist);
+      }
     }
 
-    // OPRAVA 3: Průhlednost (předposlední parametr) držíme na 1, aby nevznikly korálky na začátku tahu
     paintDab(ctx, x, y, settings, sizeMul * taper, 1, wetColor);
   }
   updateLength(currentLength + dist);
@@ -185,7 +186,7 @@ function stampAlongQuadratic(
 ): void {
   const arc = Math.max(1, quadLength(p0, p1, p2, 16));
   const effBase = settings.size * pressureScale;
-  const spacing = Math.max(0.1, effBase * 0.03);
+  const spacing = Math.max(0.5, effBase * 0.1);
   const steps = Math.max(2, Math.ceil(arc / spacing));
   
   let prev = p0;
@@ -247,22 +248,19 @@ export class HighPerformanceBrushStroke {
   }
 
   down(
-    ctx: CanvasRenderingContext2D,
+    _ctx: CanvasRenderingContext2D,
     sample: PointerBrushSample,
     settings: BrushSettings,
   ): void {
     this.reset();
-    const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
     this.smooth = { x: sample.x, y: sample.y };
     this.rawLast = { ...sample };
     this.lastDrawn = { ...this.smooth };
     this.strokePoints.push({ ...this.smooth });
-    
     this.wetColor = parseHexColor(settings.color);
     
-    // Na začátku má taper hodnotu téměř 0 pro ostré zapíchnutí do papíru
-    const initialTaper = settings.startTaper > 0 ? 0.001 : 1;
-    paintDab(ctx, this.smooth.x, this.smooth.y, settings, pres * initialTaper, 1, this.wetColor);
+    // PRE-WARM: Nasimulujeme počáteční rychlost, aby engine neudělal blob
+    this.smoothedSpeed = 800; 
   }
 
   move(
@@ -282,7 +280,13 @@ export class HighPerformanceBrushStroke {
     this.vel.y = rdy / dt;
     
     const instantSpeed = hypot(this.vel.x, this.vel.y);
-    this.smoothedSpeed = this.smoothedSpeed * 0.7 + instantSpeed * 0.3;
+    
+    // Zrychlená reakce rychlosti pera
+    if (instantSpeed > this.smoothedSpeed) {
+      this.smoothedSpeed = this.smoothedSpeed * 0.4 + instantSpeed * 0.6;
+    } else {
+      this.smoothedSpeed = this.smoothedSpeed * 0.8 + instantSpeed * 0.2;
+    }
 
     const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
 
@@ -334,12 +338,8 @@ export class HighPerformanceBrushStroke {
 
     const updateLen = (l: number) => { this.strokeLength = l; };
 
-    if (n === 2) {
-      const p0 = pts[0]!;
-      const p1 = pts[1]!;
-      stampAlongSegment(ctx, p0, p1, settings, pres, vScale, this.strokeLength, updateLen, this.wetColor);
-      this.lastDrawn = midpoint(p0, p1);
-    } else if (n >= 3) {
+    // Čekáme na 3 body (Buffering), čímž se úplně vyhneme nespolehlivé počáteční rychlosti
+    if (n >= 3) {
       const pA = pts[n - 3]!;
       const pB = pts[n - 2]!;
       const pC = pts[n - 1]!;
@@ -348,7 +348,7 @@ export class HighPerformanceBrushStroke {
       const ld = this.lastDrawn;
 
       if (!this.quadStarted) {
-        if (ld && hypot(ld.x - start.x, ld.y - start.y) > 0.25) {
+        if (ld && hypot(ld.x - start.x, ld.y - start.y) > 0.1) {
           stampAlongSegment(ctx, ld, start, settings, pres, vScale, this.strokeLength, updateLen, this.wetColor);
         }
         stampAlongQuadratic(ctx, start, pB, end, settings, pres, () => vScale, this.strokeLength, updateLen, this.wetColor);
@@ -362,7 +362,7 @@ export class HighPerformanceBrushStroke {
     this.rawLast = { ...sample };
   }
 
-  flush(
+   flush(
     ctx: CanvasRenderingContext2D,
     sample: PointerBrushSample,
     settings: BrushSettings,
@@ -371,7 +371,6 @@ export class HighPerformanceBrushStroke {
     const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
     const vScale = velocityWidthScale(this.smoothedSpeed, this.tuning);
 
-    // OPRAVA 4: Snížen limit pro spuštění Taperu na rychlost 20 (chytí to i pomalejší odhození pera)
     if (settings.endTaper > 0 && this.smoothedSpeed > 20) {
        let dirX = this.vel.x;
        let dirY = this.vel.y;
@@ -391,38 +390,36 @@ export class HighPerformanceBrushStroke {
        
        if (actualTail > 2) {
            let currentDist = 0;
-           
            while (currentDist < actualTail) {
                const t = currentDist / actualTail;
-               
-               // Ztenčení velikosti do dokonale ostré špičky
                const sizeTaper = Math.pow(1 - t, 1.5);
                const currentSize = settings.size * pres * vScale * sizeTaper;
                
-               // Kreslíme, dokud nemá tečka průměr 0.1 pixelu (úplná špička jehly)
                if (currentSize < 0.1) break;
 
-               const spacing = Math.max(0.1, currentSize * 0.03);
-               
+               const spacing = Math.max(0.5, currentSize * 0.1);
                const tx = this.lastDrawn.x + normX * currentDist;
                const ty = this.lastDrawn.y + normY * currentDist;
                
-               // OPRAVA 5: Zabraňuje korálkování! Posíláme opacityScale=1.
                paintDab(ctx, tx, ty, settings, pres * vScale * sizeTaper, 1, this.wetColor);
-               
                currentDist += spacing;
            }
        }
     } else {
       const end = { x: sample.x, y: sample.y };
-      if (hypot(end.x - this.lastDrawn.x, end.y - this.lastDrawn.y) > 0.1) {
+      const distToEnd = hypot(end.x - this.lastDrawn.x, end.y - this.lastDrawn.y);
+      
+      if (distToEnd > 0.5) {
         stampAlongSegment(ctx, this.lastDrawn, end, settings, pres, vScale, this.strokeLength, (l) => this.strokeLength = l, this.wetColor);
       }
-      paintDab(ctx, end.x, end.y, settings, pres * vScale, 1, this.wetColor);
+      
+      // Pokud uživatel udělal jen izolovanou tečku bez pohybu, uděláme plný dot
+      if (this.strokeLength < 2) {
+        paintDab(ctx, end.x, end.y, settings, pres, 1, this.wetColor);
+      }
     }
   }
 }
-
 export function paintStrokeSegment(
   ctx: CanvasRenderingContext2D,
   from: Point,

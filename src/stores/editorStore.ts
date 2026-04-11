@@ -2,7 +2,6 @@
 import { create } from "zustand";
 import type { EditorTool, BrushStyle } from "../engine/brushTypes";
 
-// Definice našich nových profesionálních štětců
 export const BRUSH_PRESETS = {
   "fade-watercolor": { name: "Fade Watercolor (Mix)", style: "round" as BrushStyle, size: 50, hardness: 0.1, opacity: 0.8, intensity: 0.3, startTaper: 150, endTaper: 150, colorMix: 0.8 },
   "blurring-marker": { name: "Blurring Marker 1", style: "marker" as BrushStyle, size: 50, hardness: 0.3, opacity: 0.9, intensity: 0.6, startTaper: 80, endTaper: 80, colorMix: 0.4 },
@@ -12,19 +11,23 @@ export const BRUSH_PRESETS = {
 
 export type PresetId = keyof typeof BRUSH_PRESETS;
 
-type EditorState = {
-  tool: EditorTool;
-  activePresetId: PresetId;
+type ToolSettings = {
+  activePresetId: PresetId | null;
   brushStyle: BrushStyle;
   brushSize: number;
   brushHardness: number;
   brushOpacity: number;
-  color: string;
-  
   intensity: number;
   startTaper: number;
   endTaper: number;
   colorMix: number;
+};
+
+type EditorState = ToolSettings & {
+  tool: EditorTool;
+  color: string;
+  brushMemory: ToolSettings;
+  eraserMemory: ToolSettings;
 
   setTool: (t: EditorTool) => void;
   loadPreset: (id: PresetId) => void;
@@ -32,43 +35,47 @@ type EditorState = {
   setBrushHardness: (h: number) => void;
   setBrushOpacity: (o: number) => void;
   setColor: (c: string) => void;
-  
   setIntensity: (i: number) => void;
   setStartTaper: (t: number) => void;
   setEndTaper: (t: number) => void;
   setColorMix: (m: number) => void;
 };
 
-export const useEditorStore = create<EditorState>((set) => ({
-  tool: "brush",
-  activePresetId: "felt-tip",
-  
-  // Výchozí hodnoty podle Felt Tip Pen
-  brushStyle: "pen",
-  brushSize: 58,
-  brushHardness: 1,
-  brushOpacity: 1,
-  color: "#1a1a1a",
-  intensity: 1,
-  startTaper: 0,
-  endTaper: 0,
-  colorMix: 0,
+const defaultBrush: ToolSettings = { activePresetId: "felt-tip", brushStyle: "pen", brushSize: 58, brushHardness: 1, brushOpacity: 1, intensity: 1, startTaper: 0, endTaper: 0, colorMix: 0 };
+const defaultEraser: ToolSettings = { activePresetId: null, brushStyle: "round", brushSize: 80, brushHardness: 1, brushOpacity: 1, intensity: 1, startTaper: 0, endTaper: 0, colorMix: 0 };
 
-  setTool: (tool) => set({ tool }),
-  
-  // Tato funkce vezme data ze seznamu nahoře a přepíše s nimi slidery
+export const useEditorStore = create<EditorState>((set, get) => ({
+  tool: "brush",
+  color: "#1a1a1a",
+  ...defaultBrush,
+  brushMemory: { ...defaultBrush },
+  eraserMemory: { ...defaultEraser },
+
+  setTool: (newTool) => {
+    const s = get();
+    if (s.tool === newTool) return;
+    
+    // Uložíme aktuální stav do paměti starého nástroje
+    const currentSettings: ToolSettings = {
+      activePresetId: s.activePresetId, brushStyle: s.brushStyle, brushSize: s.brushSize, 
+      brushHardness: s.brushHardness, brushOpacity: s.brushOpacity, intensity: s.intensity, 
+      startTaper: s.startTaper, endTaper: s.endTaper, colorMix: s.colorMix
+    };
+    
+    const targetMemory = newTool === "brush" ? s.brushMemory : s.eraserMemory;
+    
+    set({
+      tool: newTool,
+      ...(s.tool === "brush" ? { brushMemory: currentSettings } : { eraserMemory: currentSettings }),
+      ...targetMemory
+    });
+  },
+
   loadPreset: (id) => {
     const p = BRUSH_PRESETS[id];
     set({
-      activePresetId: id,
-      brushStyle: p.style,
-      brushSize: p.size,
-      brushHardness: p.hardness,
-      brushOpacity: p.opacity,
-      intensity: p.intensity,
-      startTaper: p.startTaper,
-      endTaper: p.endTaper,
-      colorMix: p.colorMix,
+      activePresetId: id, brushStyle: p.style, brushSize: p.size, brushHardness: p.hardness,
+      brushOpacity: p.opacity, intensity: p.intensity, startTaper: p.startTaper, endTaper: p.endTaper, colorMix: p.colorMix,
     });
   },
 
@@ -76,7 +83,6 @@ export const useEditorStore = create<EditorState>((set) => ({
   setBrushHardness: (brushHardness) => set({ brushHardness }),
   setBrushOpacity: (brushOpacity) => set({ brushOpacity }),
   setColor: (color) => set({ color }),
-  
   setIntensity: (intensity) => set({ intensity }),
   setStartTaper: (startTaper) => set({ startTaper }),
   setEndTaper: (endTaper) => set({ endTaper }),

@@ -225,6 +225,31 @@ export class DocumentCanvas {
     return c.toDataURL("image/png");
   }
 
+  exportAsBlob(): Promise<Blob | null> {
+    return new Promise((resolve) => {
+      const c = document.createElement("canvas");
+      c.width = this.width;
+      c.height = this.height;
+      const ctx = c.getContext("2d");
+      if (!ctx) return resolve(null);
+      
+      // Bílé pozadí
+      ctx.fillStyle = "#ffffff"; 
+      ctx.fillRect(0, 0, this.width, this.height);
+
+      // Vykreslení všech viditelných vrstev
+      for (const spr of this.layerRoot.children as Sprite[]) {
+        if (!spr.visible) continue;
+        const rt = [...this.runtimes.values()].find((r) => r.sprite === spr);
+        if (!rt) continue;
+        ctx.drawImage(rt.canvas, 0, 0);
+      }
+      
+      // Převod na skutečný soubor (Blob) místo obřího textového řetězce
+      c.toBlob((blob) => resolve(blob), "image/png");
+    });
+  }
+
   private buildChecker(): void {
     const g = new Graphics();
     const cols = Math.ceil(this.width / CHECK_SIZE);

@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-tauri:
+  # 1. LINKA: SESTAVENÍ PRO MAC A WINDOWS
+  build-desktop:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-latest]
+        platform: [macos-latest, windows-latest]
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -22,40 +23,72 @@ jobs:
 
       - name: Instalace Rustu
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'ubuntu-latest' && 'aarch64-linux-android' || '' }}
 
-      - name: Instalace Javy a Android SDK
-        if: matrix.platform == 'ubuntu-latest'
+      - name: Instalace NPM balíčků
+        run: npm install
+
+      - name: Sestavení Desktop aplikací
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v0.3.0
+          releaseName: 'Flowdy v0.3.0'
+          releaseDraft: true
+          prerelease: false
+
+  # 2. LINKA: SESTAVENÍ PRO ANDROID
+  build-android:
+    needs: build-desktop # Počká, až se vyrobí Mac/Win, aby se nepohádaly o místo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stáhnutí kódu
+        uses: actions/checkout@v4
+
+      - name: Instalace Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalace Rustu (s podporou Androidu)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Instalace Javy
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
       - name: Setup Android NDK
-        if: matrix.platform == 'ubuntu-latest'
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r25c
+          ndk-version: r26b
+          add-to-path: false
 
       - name: Accept Android Licenses
-        if: matrix.platform == 'ubuntu-latest'
         run: yes | sdkmanager --licenses || true
 
       - name: Instalace NPM balíčků
         run: npm install
 
-      # Tady je ta změna: Cestu k linkeru přidáme přímo do PATH v rámci shellu
-      - name: Sestavení aplikací
-        uses: tauri-apps/tauri-action@v0
+      - name: Tauri Android Init
+        run: npx tauri android init
+
+      - name: Sestavení Android APK (Správným příkazem)
+        run: npx tauri android build
+        env:
+          # Tento krok automaticky navede Tauri na správné nástroje
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Nahrání APK do Releases
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.2.7
-          releaseName: 'Flowdy v0.2.7'
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
-          # Tato funkce v tauri-action umožní upravit prostředí před buildem
-          beforeBuildCommand: ${{ matrix.platform == 'ubuntu-latest' && format('export PATH="{0}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"', steps.setup-ndk.outputs.ndk-path) || '' }}
+          tag_name: v0.3.0
+          draft: true
+          # Najde a nahraje všechny vytvořené APK soubory
+          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
