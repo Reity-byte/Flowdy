@@ -25,7 +25,15 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'ubuntu-latest' && 'aarch64-linux-android' || '' }}
 
-      - name: Instalace Javy a Android SDK
+      # NASTAVENÍ ANDROIDU (Změna: používáme ověřenou akci pro nastavení NDK)
+      - name: Setup Android NDK
+        if: matrix.platform == 'ubuntu-latest'
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c # Stabilní verze pro Tauri
+
+      - name: Instalace Javy
         if: matrix.platform == 'ubuntu-latest'
         uses: actions/setup-java@v4
         with:
@@ -39,7 +47,6 @@ jobs:
       - name: Instalace NPM balíčků
         run: npm install
 
-      # Vytvoříme konfigurační soubory pro Android, pokud neexistují
       - name: Tauri Android Init
         if: matrix.platform == 'ubuntu-latest'
         run: npx tauri android init
@@ -48,12 +55,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Tady říkáme linkeru, kde má hledat Android nástroje
-          NDK_HOME: ${{ steps.setup-android.outputs.ndk-path }}
+          # Tato proměnná je klíčová pro linker v Rustu
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         with:
-          tagName: v0.2.3
-          releaseName: 'Flowdy v0.2.3'
-          releaseBody: 'Snad už finální oprava linkeru pro Android.'
+          tagName: v0.2.4
+          releaseName: 'Flowdy v0.2.4'
+          releaseBody: 'Android Build s fixnutým NDK Toolchainem.'
           releaseDraft: true
           prerelease: false
+          # Přidali jsme argument, který vynutí správný linker
           args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
