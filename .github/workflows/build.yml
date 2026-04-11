@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  # 1. LINKA: SESTAVENÍ PRO MAC A WINDOWS
+  # 1. LINKA: SESTAVENÍ PRO WINDOWS (Mac je dočasně vypnutý)
   build-desktop:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, windows-latest]
+        platform: [windows-latest]
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -32,14 +32,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.3.0
-          releaseName: 'Flowdy v0.3.0'
+          tagName: v0.4.1
+          releaseName: 'Flowdy v0.4.1'
           releaseDraft: true
           prerelease: false
 
-  # 2. LINKA: SESTAVENÍ PRO ANDROID
+  # 2. LINKA: SESTAVENÍ PRO ANDROID (Už nečeká na počítače!)
   build-android:
-    needs: build-desktop # Počká, až se vyrobí Mac/Win, aby se nepohádaly o místo
     runs-on: ubuntu-latest
     steps:
       - name: Stáhnutí kódu
@@ -77,10 +76,9 @@ jobs:
       - name: Tauri Android Init
         run: npx tauri android init
 
-      - name: Sestavení Android APK (Správným příkazem)
+      - name: Sestavení Android APK
         run: npx tauri android build
         env:
-          # Tento krok automaticky navede Tauri na správné nástroje
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Nahrání APK do Releases
@@ -88,7 +86,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v0.3.0
+          tag_name: v0.4.1
           draft: true
-          # Najde a nahraje všechny vytvořené APK soubory
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
