@@ -50,11 +50,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Tato část přidá Android nástroje do cesty, aby je Rust viděl
-          PATH: ${{ matrix.platform == 'ubuntu-latest' && format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin:{1}', steps.setup-ndk.outputs.ndk-path, env.PATH) || env.PATH }}
         with:
-          tagName: v0.2.5
-          releaseName: 'Flowdy v0.2.5'
+          tagName: v0.2.6
+          releaseName: 'Flowdy v0.2.6'
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.platform == 'ubuntu-latest' && '--target aarch64-linux-android' || '' }}
+          # Změna: PATH nastavujeme přímo v argumentu pro Linux, aby se nepoškodilo globální ENV
+          args: ${{ matrix.platform == 'ubuntu-latest' && format('--target aarch64-linux-android --bundle-path-env PATH={0}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH', steps.setup-ndk.outputs.ndk-path) || '' }}
