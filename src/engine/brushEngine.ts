@@ -31,7 +31,7 @@ function parseHexColor(hex: string): { r: number; g: number; b: number } {
 }
 
 function normalizedPressure(sample: PointerBrushSample): number {
-  if (sample.pointerType === "pen" && sample.pressure > 0 && sample.pressure <= 1) {
+  if (sample.pointerType === "pen") {
     return sample.pressure;
   }
   return 1;
@@ -128,7 +128,9 @@ function stampAlongSegment(
   const dist = hypot(to.x - from.x, to.y - from.y);
   const effSize = settings.size * pressureScale * velocityScale;
   
-  const spacing = Math.max(0.5, effSize * 0.1); 
+  // OPRAVA KORÁLKŮ: Změněno z 0.1 na 0.05 a minimum na 0.2
+  // Tím je čára mnohem hustší a konce se "nerozpadnou" na tečky
+  const spacing = Math.max(0.2, effSize * 0.05); 
   const steps = Math.max(1, Math.ceil(dist / spacing));
   const sizeMul = pressureScale * velocityScale;
 
@@ -143,7 +145,6 @@ function stampAlongSegment(
       const ratio = dabLength / settings.startTaper;
       taper = Math.pow(ratio, 1.5); 
     } else {
-      // OCHRANA PROTI BLOBŮM: Zajišťuje ostrý a plynulý začátek
       const introDist = Math.max(2, settings.size * 0.25);
       if (dabLength < introDist) {
         taper = 0.2 + 0.8 * (dabLength / introDist);
@@ -368,8 +369,25 @@ export class HighPerformanceBrushStroke {
     settings: BrushSettings,
   ): void {
     if (!this.smooth || !this.lastDrawn || !this.wetColor) return;
-    const pres = applyPressureCurve(normalizedPressure(sample), this.tuning.pressureCurveGamma);
+
+    // 1. ZÁCHRANA PRO RYCHLÉ TEČKY: 
+    // Pokud uživatel jen ťuknul perem (strokeLength < 2) a pero 
+    // teď na konci posílá tlak 0, "půjčíme" si tlak ze začátku ťuknutí.
+    let p = sample.pressure;
+    if (sample.pointerType === "pen" && p === 0 && this.strokeLength < 2) {
+      p = this.rawLast ? Math.max(this.rawLast.pressure, 0.1) : 0.5;
+    }
+
+    const safeSample = { ...sample, pressure: p };
+    const pres = applyPressureCurve(normalizedPressure(safeSample), this.tuning.pressureCurveGamma);
     const vScale = velocityWidthScale(this.smoothedSpeed, this.tuning);
+
+    // 2. ZABITÍ PILULKY A MEZERY: 
+    // Pokud máme rozjetý normální tah a pero se zvedlo (tlak 0), 
+    // koncová souřadnice obvykle odskočí. Úplně ji ignorujeme!
+    if (sample.pointerType === "pen" && sample.pressure === 0 && this.strokeLength >= 2) {
+      return; 
+    }
 
     if (settings.endTaper > 0 && this.smoothedSpeed > 20) {
        let dirX = this.vel.x;
@@ -406,14 +424,13 @@ export class HighPerformanceBrushStroke {
            }
        }
     } else {
-      const end = { x: sample.x, y: sample.y };
+      const end = { x: safeSample.x, y: safeSample.y };
       const distToEnd = hypot(end.x - this.lastDrawn.x, end.y - this.lastDrawn.y);
       
-      if (distToEnd > 0.5) {
+      if (distToEnd > Math.max(0.5, settings.size * 0.1)) {
         stampAlongSegment(ctx, this.lastDrawn, end, settings, pres, vScale, this.strokeLength, (l) => this.strokeLength = l, this.wetColor);
       }
       
-      // Pokud uživatel udělal jen izolovanou tečku bez pohybu, uděláme plný dot
       if (this.strokeLength < 2) {
         paintDab(ctx, end.x, end.y, settings, pres, 1, this.wetColor);
       }

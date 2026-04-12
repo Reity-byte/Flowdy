@@ -1,22 +1,13 @@
-import {
-  Application,
-  Container,
-  Graphics,
-  Point as PixiPoint,
-  Sprite,
-  Texture,
-} from "pixi.js";
-import {
-  CHECKER_DARK,
-  CHECKER_LIGHT,
-} from "./artboardConfig";
+import { Application, Container, Graphics, Point as PixiPoint, Sprite, Texture } from "pixi.js";
+import { CHECKER_DARK, CHECKER_LIGHT } from "./artboardConfig";
 import { useAppStore } from "../stores/appStore";
-import { brushSettingsForTool, HighPerformanceBrushStroke } from "./brushEngine";
-import type { BrushSettings, Point, PointerBrushSample } from "./brushTypes";
-import type { LayerMeta } from "../stores/layerStore";
-import type { DocumentSnapshot } from "../stores/historyStore";
+import { useHistoryStore, type DocumentSnapshot } from "../stores/historyStore";
 import { useEditorStore } from "../stores/editorStore";
-import { useLayerStore } from "../stores/layerStore";
+import { useLayerStore, type LayerMeta } from "../stores/layerStore";
+import { brushSettingsForTool, HighPerformanceBrushStroke } from "./brushEngine";
+
+// OPRAVA TADY: Přidali jsme BrushSettings do importu
+import type { BrushSettings, Point, PointerBrushSample } from "./brushTypes";
 
 const CHECK_SIZE = 64;
 
@@ -98,7 +89,9 @@ export class DocumentCanvas {
       preference: "webgl",
     });
     this.app = app;
-    document.addEventListener("wheel", (e) => { if (e.ctrlKey) e.preventDefault() }, { passive: false });
+    
+    // Zabraňuje zoomování prohlížeče při scrollování s Ctrl
+    document.addEventListener("wheel", (e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }, { passive: false });
     this.host.appendChild(app.canvas as HTMLCanvasElement);
 
     this.buildChecker();
@@ -117,6 +110,8 @@ export class DocumentCanvas {
     canvas.addEventListener("pointercancel", this.onPointerUp);
     canvas.addEventListener("lostpointercapture", this.onLostPointerCapture);
     canvas.addEventListener("wheel", this.onWheel, { passive: false });
+    
+    // Globální event listenery pro klávesnici (lepší zachycení zkratek)
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
   }
@@ -138,7 +133,7 @@ export class DocumentCanvas {
     this.runtimes.clear();
   }
 
- syncLayers(metas: LayerMeta[]): void {
+  syncLayers(metas: LayerMeta[]): void {
     const ids = new Set(metas.map((m) => m.id));
     for (const id of [...this.runtimes.keys()]) {
       if (!ids.has(id)) {
@@ -150,9 +145,7 @@ export class DocumentCanvas {
 
     for (const meta of metas) {
       if (!this.runtimes.has(meta.id)) {
-        // OPRAVA TADY: Přidáno (this.width, this.height)
         const { canvas, ctx } = makeLayerSurface(this.width, this.height);
-        
         const texture = Texture.from(canvas);
         const sprite = new Sprite(texture);
         sprite.position.set(0, 0);
@@ -225,28 +218,26 @@ export class DocumentCanvas {
     return c.toDataURL("image/png");
   }
 
-  exportAsBlob(): Promise<Blob | null> {
+  async exportAsBlob(format: string = "png", scale: number = 1): Promise<Blob | null> {
     return new Promise((resolve) => {
       const c = document.createElement("canvas");
-      c.width = this.width;
-      c.height = this.height;
+      c.width = this.width * scale;
+      c.height = this.height * scale;
       const ctx = c.getContext("2d");
       if (!ctx) return resolve(null);
       
-      // Bílé pozadí
+      ctx.scale(scale, scale);
       ctx.fillStyle = "#ffffff"; 
       ctx.fillRect(0, 0, this.width, this.height);
 
-      // Vykreslení všech viditelných vrstev
       for (const spr of this.layerRoot.children as Sprite[]) {
         if (!spr.visible) continue;
-        const rt = [...this.runtimes.values()].find((r) => r.sprite === spr);
-        if (!rt) continue;
-        ctx.drawImage(rt.canvas, 0, 0);
+        const rt = Array.from(this.runtimes.values()).find((r) => r.sprite === spr);
+        if (rt) ctx.drawImage(rt.canvas, 0, 0);
       }
       
-      // Převod na skutečný soubor (Blob) místo obřího textového řetězce
-      c.toBlob((blob) => resolve(blob), "image/png");
+      const mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
+      c.toBlob((blob) => resolve(blob), mime, 0.95);
     });
   }
 
@@ -260,7 +251,6 @@ export class DocumentCanvas {
         g.rect(i * CHECK_SIZE, j * CHECK_SIZE, CHECK_SIZE, CHECK_SIZE).fill({ color });
       }
     }
-    // OPRAVA OPTICKÉHO KLAMU: Přidáme jasný rámeček kolem celého plátna!
     g.rect(0, 0, this.width, this.height).stroke({ width: 2, color: 0x475569 });
     this.checker = g;
   }
@@ -327,6 +317,32 @@ export class DocumentCanvas {
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === "Space") this.spaceHeld = true;
+    
+    // SHORTCUTS: Funguje pro Windows (Ctrl) i Mac (Cmd)
+    const isZ = e.key.toLowerCase() === 'z' || e.code === 'KeyZ';
+    const isMod = e.ctrlKey || e.metaKey;
+
+    if (isMod && isZ) {
+      e.preventDefault();
+      e.stopPropagation(); // Zabraňuje konfliktu s prohlížečem
+      
+      const history = useHistoryStore.getState();
+      const app = useAppStore.getState();
+
+      if (e.shiftKey) {
+        const snap = history.redo();
+        if (snap) {
+          this.restoreSnapshot(snap);
+          app.showNotification("Redo");
+        }
+      } else {
+        const snap = history.undo();
+        if (snap) {
+          this.restoreSnapshot(snap);
+          app.showNotification("Undo");
+        }
+      }
+    }
   };
 
   private onKeyUp = (e: KeyboardEvent): void => {
@@ -340,20 +356,24 @@ export class DocumentCanvas {
 
     this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    // Pokud se dotknou 2 prsty, aktivuj Multi-Touch Zoom a přeruš kreslení
+    // MOBILE UNDO: Klepnutí 2 prsty
     if (this.activePointers.size === 2) {
       this.drawing = false;
       this.stroking = false;
       this.panning = false;
       this.isPinching = true;
 
+      const snap = useHistoryStore.getState().undo();
+      if (snap) {
+        this.restoreSnapshot(snap);
+        useAppStore.getState().showNotification("Undo");
+      }
+
       const pts = Array.from(this.activePointers.values());
       this.initialPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       this.initialPinchZoom = this.zoom;
       this.initialPinchCenter = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
       this.initialPinchPan = { ...this.pan };
-      return;
-    } else if (this.activePointers.size > 2) {
       return;
     }
 

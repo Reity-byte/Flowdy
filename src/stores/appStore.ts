@@ -13,6 +13,14 @@ type AppState = {
   pendingLoadSnapshot: any | null; 
   canvasWidth: number;
   canvasHeight: number;
+  
+  // Stavy pro notifikace a export
+  notification: string | null;
+  isExportModalOpen: boolean;
+  
+  showNotification: (msg: string) => void;
+  toggleExportModal: (isOpen: boolean) => void;
+  
   deleteProject: (id: string) => Promise<void>;
   toggleNewCanvasPopup: (isOpen: boolean) => void;
   openGallery: () => void;
@@ -30,6 +38,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingLoadSnapshot: null,
   canvasWidth: 2048,
   canvasHeight: 2048,
+  
+  notification: null,
+  isExportModalOpen: false,
+
+  toggleExportModal: (isOpen) => set({ isExportModalOpen: isOpen }),
+
+  showNotification: (msg) => {
+    set({ notification: msg });
+    setTimeout(() => set({ notification: null }), 2000); // Zmizí po 2 sekundách
+  },
   
   toggleNewCanvasPopup: (isOpen) => set({ isNewCanvasPopupOpen: isOpen }),
   
@@ -90,11 +108,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       height: state.canvasHeight
     });
 
+    get().showNotification("Artwork Saved ✅");
     await state.fetchProjects();
   },
-// ... zbytek souboru zůstává stejný (renameProject, deleteProject atd.),
 
-  // OPRAVENO: Vrácena implementace renameProject
   renameProject: async (id: string, newName: string) => {
     await updateProjectName(id, newName);
     await get().fetchProjects(); 

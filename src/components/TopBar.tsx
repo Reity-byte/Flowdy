@@ -14,6 +14,7 @@ export function TopBar() {
 
   const saveProject = useAppStore((s) => s.saveCurrentProject);
   const openGallery = useAppStore((s) => s.openGallery);
+  const toggleExportModal = useAppStore((s) => s.toggleExportModal);
 
   const tool = useEditorStore((s) => s.tool);
   const setTool = useEditorStore((s) => s.setTool);
@@ -34,19 +35,6 @@ export function TopBar() {
     }
   };
 
-  const handleExportPNG = async () => {
-    if (!documentEngineRef.current) return;
-    const blob = await documentEngineRef.current.exportAsBlob();
-    if (!blob) return;
-    
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "flowdy-artwork.png";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   return (
     <div className="flex gap-2 p-2 bg-shell-bg border-b border-shell-border items-center justify-between">
       
@@ -56,10 +44,10 @@ export function TopBar() {
           🖼 Galerie
         </button>
         <button onClick={() => saveProject()} className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors">
-          💾 Uložit
+          💾 Save Artwork
         </button>
-        <button onClick={handleExportPNG} className="px-3 py-1 rounded hover:bg-shell-panel transition-colors">
-          ⬇ Export PNG
+        <button onClick={() => toggleExportModal(true)} className="px-3 py-1 rounded hover:bg-shell-panel transition-colors">
+          ⬇ Export
         </button>
       </div>
 
@@ -72,7 +60,7 @@ export function TopBar() {
               tool === "brush" ? "bg-blue-600 text-white shadow" : "hover:bg-shell-bg"
             }`}
           >
-            🖌 Štětec
+            🖌 Brush
           </button>
           <button
             onClick={() => setTool("eraser")}
@@ -80,7 +68,7 @@ export function TopBar() {
               tool === "eraser" ? "bg-blue-600 text-white shadow" : "hover:bg-shell-bg"
             }`}
           >
-            🧹 Guma
+            🧹 Eraser
           </button>
         </div>
 
@@ -126,10 +114,10 @@ export function TopBar() {
       {/* PRAVÁ ČÁST */}
       <div className="flex gap-2 w-1/3 justify-end">
         <button onClick={handleUndo} disabled={!canUndo} className={`px-3 py-1 rounded transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : "hover:bg-shell-panel"}`}>
-          ↩ Zpět
+          ↩ Undo
         </button>
         <button onClick={handleRedo} disabled={!canRedo} className={`px-3 py-1 rounded transition-colors ${!canRedo ? "opacity-30 cursor-not-allowed" : "hover:bg-shell-panel"}`}>
-          Vpřed ↪
+          Redo ↪
         </button>
       </div>
 
