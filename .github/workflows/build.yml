@@ -1,43 +1,9 @@
-name: Build Flowdy
+name: Build Flowdy (Android Only)
 
 on:
   workflow_dispatch:
 
 jobs:
-  # 1. LINKA: SESTAVENÍ PRO WINDOWS A MAC
-  build-desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [windows-latest, macos-latest]
-
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - name: Stáhnutí kódu
-        uses: actions/checkout@v4
-
-      - name: Instalace Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Instalace Rustu
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Instalace NPM balíčků
-        run: npm install
-
-      - name: Sestavení Desktop aplikací
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v0.4.2
-          releaseName: 'Flowdy v0.4.2'
-          releaseDraft: true
-          prerelease: false
-
-  # 2. LINKA: SESTAVENÍ PRO ANDROID
   build-android:
     runs-on: ubuntu-latest
     steps:
@@ -76,6 +42,9 @@ jobs:
       - name: Tauri Android Init
         run: npx tauri android init
 
+      - name: Vygenerování finálních ikon
+        run: npx tauri icon icon.png
+
       - name: Sestavení Android APK
         run: npx tauri android build --debug
         env:
@@ -86,6 +55,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v0.4.2
+          tag_name: v0.4.4
           draft: true
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
