@@ -1,4 +1,3 @@
-// src/stores/editorStore.ts
 import { create } from "zustand";
 import type { EditorTool, BrushStyle } from "../engine/brushTypes";
 
@@ -55,19 +54,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const s = get();
     if (s.tool === newTool) return;
     
-    // Uložíme aktuální stav do paměti starého nástroje
+    // Uložíme aktuální stav do paměti
     const currentSettings: ToolSettings = {
       activePresetId: s.activePresetId, brushStyle: s.brushStyle, brushSize: s.brushSize, 
       brushHardness: s.brushHardness, brushOpacity: s.brushOpacity, intensity: s.intensity, 
       startTaper: s.startTaper, endTaper: s.endTaper, colorMix: s.colorMix
     };
     
-    const targetMemory = newTool === "brush" ? s.brushMemory : s.eraserMemory;
+    // Bezpečné uložení pouze pro štětec a gumu
+    if (s.tool === "brush") set({ brushMemory: currentSettings });
+    if (s.tool === "eraser") set({ eraserMemory: currentSettings });
+    
+    // Načtení paměti nového nástroje
+    let targetMemory = null;
+    if (newTool === "brush") targetMemory = get().brushMemory;
+    if (newTool === "eraser") targetMemory = get().eraserMemory;
     
     set({
       tool: newTool,
-      ...(s.tool === "brush" ? { brushMemory: currentSettings } : { eraserMemory: currentSettings }),
-      ...targetMemory
+      ...(targetMemory ? targetMemory : {})
     });
   },
 

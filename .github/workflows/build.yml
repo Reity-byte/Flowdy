@@ -1,26 +1,75 @@
-name: Build Flowdy (Android Only)
+name: Release All Platforms
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
-  build-android:
-    runs-on: ubuntu-latest
+  # 1. JOB: Desktop (Windows, MacOS, Linux)
+  build-desktop:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.platform }}
     steps:
-      - name: Stáhnutí kódu
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Instalace Node.js
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies (Ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install NPM dependencies
+        run: npm install
+
+      - name: Build Desktop Application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__ # Verze se vezme z package.json
+          releaseName: "Flowdy v__VERSION__"
+          releaseBody: "Automatický build pro desktop a Android."
+          releaseDraft: true
+          prerelease: false
+
+  # 2. JOB: Android
+  build-android:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Instalace Rustu (s podporou Androidu)
+      - name: Install Rust (with Android targets)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
-      - name: Instalace Javy
+      - name: Install Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
@@ -36,25 +85,28 @@ jobs:
       - name: Accept Android Licenses
         run: yes | sdkmanager --licenses || true
 
-      - name: Instalace NPM balíčků
+      - name: Install NPM dependencies
         run: npm install
 
-      - name: Tauri Android Init
-        run: npx tauri android init
+      - name: Tauri Android Init and Icons
+        # Spustí se pouze pokud složka gen/android neexistuje
+        run: |
+          if [ ! -d "src-tauri/gen/android" ]; then
+            npx tauri android init
+          fi
+          npx tauri icon icon.png
 
-      - name: Vygenerování finálních ikon
-        run: npx tauri icon icon.png
-
-      - name: Sestavení Android APK
+      - name: Build Android APK
         run: npx tauri android build --debug
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Nahrání APK do Releases
+      - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/heads/main')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v0.4.4
-          draft: true
+          tag_name: v0.4.4 # Upravte dle potřeby nebo použijte dynamické tagování
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          draft: true

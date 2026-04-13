@@ -5,6 +5,7 @@ import { useHistoryStore, type DocumentSnapshot } from "../stores/historyStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useLayerStore, type LayerMeta } from "../stores/layerStore";
 import { brushSettingsForTool, HighPerformanceBrushStroke } from "./brushEngine";
+import { SelectionManager } from "./SelectionManager";
 
 // OPRAVA TADY: Přidali jsme BrushSettings do importu
 import type { BrushSettings, Point, PointerBrushSample } from "./brushTypes";
@@ -49,10 +50,12 @@ export class DocumentCanvas {
   private height = 2048;
   private pan = { x: 40, y: 40 };
   private zoom = 0.45;
+  private rotation = 0;
   
   private drawing = false;
   private stroking = false;
   private brush = new HighPerformanceBrushStroke();
+  private selection = new SelectionManager();
   private spaceHeld = false;
   private panning = false;
   private panPointerStart = { x: 0, y: 0 };
@@ -63,8 +66,9 @@ export class DocumentCanvas {
   private activePointers = new Map<number, { x: number, y: number }>();
   private initialPinchDist = 1;
   private initialPinchZoom = 1;
-  private initialPinchCenter = { x: 0, y: 0 };
-  private initialPinchPan = { x: 0, y: 0 };
+  private initialPinchAngle = 0;
+  private initialPinchRotation = 0;
+  private pinchWorldCenter: PixiPoint = new PixiPoint(); // NOVÉ: Kotevní bod pro rotaci
   private isPinching = false;
 
   getImageBounds() {
@@ -97,6 +101,7 @@ export class DocumentCanvas {
     this.buildChecker();
     this.boardRoot.addChild(this.checker);
     this.boardRoot.addChild(this.layerRoot);
+    this.boardRoot.addChild(this.selection.container);
     this.world.addChild(this.boardRoot);
     app.stage.addChild(this.world);
     this.applyWorldTransform();
@@ -251,22 +256,26 @@ export class DocumentCanvas {
         g.rect(i * CHECK_SIZE, j * CHECK_SIZE, CHECK_SIZE, CHECK_SIZE).fill({ color });
       }
     }
-    g.rect(0, 0, this.width, this.height).stroke({ width: 2, color: 0x475569 });
+    
+    // TENTO ŘÁDEK PŘIDEJ ZPĚT: Nakreslí viditelný okraj papíru
+    g.rect(0, 0, this.width, this.height).stroke({ width: 4, color: 0x475569 });
+    
     this.checker = g;
   }
 
   private applyWorldTransform(): void {
     this.world.position.set(this.pan.x, this.pan.y);
     this.world.scale.set(this.zoom);
+    this.world.rotation = this.rotation; // Přidána rotace
   }
 
+  // ZCELA PŘEPSÁNO: Nyní to za nás počítá PixiJS
   private screenToWorld(clientX: number, clientY: number): Point {
     if (!this.app) return { x: 0, y: 0 };
     this.app.renderer.events.mapPositionToPoint(this.pointerScratch, clientX, clientY);
-    return {
-      x: (this.pointerScratch.x - this.pan.x) / this.zoom,
-      y: (this.pointerScratch.y - this.pan.y) / this.zoom,
-    };
+    // toLocal automaticky zohlední pan, zoom i rotaci
+    const local = this.world.toLocal(this.pointerScratch); 
+    return { x: local.x, y: local.y };
   }
 
   private clampWorld(p: Point): Point {
@@ -297,20 +306,41 @@ export class DocumentCanvas {
 
     if (e.ctrlKey || e.metaKey || e.altKey) {
       this.app.renderer.events.mapPositionToPoint(this.pointerScratch, e.clientX, e.clientY);
-      const sx = this.pointerScratch.x;
-      const sy = this.pointerScratch.y;
-      const beforeX = (sx - this.pan.x) / this.zoom;
-      const beforeY = (sy - this.pan.y) / this.zoom;
+      
+      // Zjistíme, nad jakým bodem plátna myš zrovna stojí
+      const worldPos = this.world.toLocal(this.pointerScratch);
 
       const zoomFactor = Math.exp(-dy * 0.005);
-      const nextZoom = Math.min(20, Math.max(0.05, this.zoom * zoomFactor));
+      this.zoom = Math.min(20, Math.max(0.05, this.zoom * zoomFactor));
 
-      this.zoom = nextZoom;
-      this.pan.x = sx - beforeX * this.zoom;
-      this.pan.y = sy - beforeY * this.zoom;
+      // Simulujeme novou pozici (zatím bez úpravy pan)
+      this.world.scale.set(this.zoom);
+      this.world.position.set(this.pan.x, this.pan.y);
+
+      // Podíváme se, kam nám náš bod na plátně po zoomu "utekl"
+      const newScreenPos = this.world.toGlobal(worldPos);
+
+      // A posuneme kameru tak, aby se vrátil zpět pod myš
+      this.pan.x += this.pointerScratch.x - newScreenPos.x;
+      this.pan.y += this.pointerScratch.y - newScreenPos.y;
     } else {
-      if (e.shiftKey && dx === 0) this.pan.x -= dy;
-      else { this.pan.x -= dx; this.pan.y -= dy; }
+      // Rotace na PC pomocí Shift + Kolečko
+      if (e.shiftKey) { 
+        this.app.renderer.events.mapPositionToPoint(this.pointerScratch, e.clientX, e.clientY);
+        const worldPos = this.world.toLocal(this.pointerScratch);
+        
+        this.rotation += dy * 0.005;
+        
+        this.world.rotation = this.rotation;
+        this.world.position.set(this.pan.x, this.pan.y);
+        const newScreenPos = this.world.toGlobal(worldPos);
+        this.pan.x += this.pointerScratch.x - newScreenPos.x;
+        this.pan.y += this.pointerScratch.y - newScreenPos.y;
+      }
+      else { 
+        // Normální posun
+        this.pan.x -= dx; this.pan.y -= dy; 
+      }
     }
     this.applyWorldTransform();
   };
@@ -350,7 +380,7 @@ export class DocumentCanvas {
   };
 
   // --- OPRAVA MULTI-TOUCH A PINCH ZOOMU ---
-  private onPointerDown = (e: PointerEvent): void => {
+private onPointerDown = (e: PointerEvent): void => {
     if (!this.app) return;
     try { (this.app.canvas as HTMLCanvasElement).setPointerCapture(e.pointerId); } catch {}
 
@@ -372,8 +402,15 @@ export class DocumentCanvas {
       const pts = Array.from(this.activePointers.values());
       this.initialPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       this.initialPinchZoom = this.zoom;
-      this.initialPinchCenter = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
-      this.initialPinchPan = { ...this.pan };
+
+      this.initialPinchAngle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+      this.initialPinchRotation = this.rotation;
+
+      const cx = (pts[0].x + pts[1].x) / 2;
+      const cy = (pts[0].y + pts[1].y) / 2;
+      this.app.renderer.events.mapPositionToPoint(this.pointerScratch, cx, cy);
+      this.world.toLocal(this.pointerScratch, undefined, this.pinchWorldCenter);
+
       return;
     }
 
@@ -387,8 +424,23 @@ export class DocumentCanvas {
     if (this.isPinching || e.button !== 0) return;
 
     const world = this.screenToWorld(e.clientX, e.clientY);
+    const tool = useEditorStore.getState().tool;
+    
+    // VÝHYBKA PRO SELECT TOOL
+    if (tool === "select") {
+      const ctx = this.getActiveCtx();
+      // Pošleme kontext manažerovi, aby mohl lepit staré pixely
+      this.selection.startSelection(world.x, world.y, this.zoom, ctx);
+      
+      // Nutno překreslit plátno (pro případ, že jsme právě přilepili starý výběr zpět)
+      const rt = this.getActiveRuntime();
+      if (rt) updateCanvasTexture(rt.sprite);
+      
+      return; 
+    }
+
     const ctx = this.getActiveCtx();
-    if (!ctx) return;
+    if (!ctx) return; // Pojistka, pokud není aktivní žádná vrstva
 
     this.drawing = true;
     this.stroking = true;
@@ -399,6 +451,8 @@ export class DocumentCanvas {
   };
 
   private onPointerMove = (e: PointerEvent): void => {
+    if (!this.app) return;
+
     if (this.activePointers.has(e.pointerId)) {
       this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     }
@@ -409,16 +463,33 @@ export class DocumentCanvas {
       const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       const currentCenter = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
 
+      const currentAngle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+
       if (this.initialPinchDist > 0) {
         const scale = currentDist / this.initialPinchDist;
-        const nextZoom = Math.min(20, Math.max(0.05, this.initialPinchZoom * scale));
-        const ratio = nextZoom / this.initialPinchZoom;
         
-        this.zoom = nextZoom;
-        this.pan.x = currentCenter.x - (this.initialPinchCenter.x - this.initialPinchPan.x) * ratio;
-        this.pan.y = currentCenter.y - (this.initialPinchCenter.y - this.initialPinchPan.y) * ratio;
+        this.zoom = Math.min(20, Math.max(0.05, this.initialPinchZoom * scale));
+        this.rotation = this.initialPinchRotation + (currentAngle - this.initialPinchAngle);
+
+        this.world.scale.set(this.zoom);
+        this.world.rotation = this.rotation;
+        this.world.position.set(this.pan.x, this.pan.y);
+
+        this.app.renderer.events.mapPositionToPoint(this.pointerScratch, currentCenter.x, currentCenter.y);
+        const newScreenPos = this.world.toGlobal(this.pinchWorldCenter);
+
+        this.pan.x += this.pointerScratch.x - newScreenPos.x;
+        this.pan.y += this.pointerScratch.y - newScreenPos.y;
+
         this.applyWorldTransform();
       }
+      return;
+    }
+
+    // TAŽENÍ MODRÉHO RÁMEČKU NEBO JEHO OBSAHU
+    if (this.selection.isSelecting || this.selection.isMoving) {
+      const world = this.screenToWorld(e.clientX, e.clientY);
+      this.selection.updateSelection(world.x, world.y, this.zoom);
       return;
     }
 
@@ -459,6 +530,20 @@ export class DocumentCanvas {
       return;
     }
 
+    // --- NOVÉ: UKONČENÍ VÝBĚRU A TAŽENÍ ---
+    if (this.selection.isSelecting || this.selection.isMoving) {
+      const activeCtx = this.getActiveCtx();
+      this.selection.endSelection(activeCtx);
+      
+      // Důležité: Překreslíme vrstvu, protože jsme z ní vyřízli (nebo do ní vlepili) pixely
+      const rt = this.getActiveRuntime();
+      if (rt) updateCanvasTexture(rt.sprite);
+      
+      try { (this.app?.canvas as HTMLCanvasElement)?.releasePointerCapture(e.pointerId); } catch {}
+      return;
+    }
+
+    // --- ZBYTEK FUNKCE PRO KRESLENÍ ZŮSTÁVÁ ---
     if (this.drawing) {
       const ctx = this.getActiveCtx();
       const world = this.screenToWorld(e.clientX, e.clientY);
@@ -484,6 +569,10 @@ export class DocumentCanvas {
       intensity, startTaper, endTaper, colorMix, brushStyle 
     } = useEditorStore.getState();
     
+    // OPRAVA: Ochrana typu pro TypeScript. 
+    // Pokud je tool "select", tváříme se jako "brush", aby TS nenadával.
+    const safeTool = (tool === "select" ? "brush" : tool) as "brush" | "eraser";
+
     return brushSettingsForTool({ 
       size: brushSize, 
       hardness: brushHardness, 
@@ -494,7 +583,7 @@ export class DocumentCanvas {
       endTaper, 
       colorMix,
       brushStyle 
-    }, tool);
+    }, safeTool);
   }
 
   private getActiveCtx(): CanvasRenderingContext2D | null {

@@ -53,7 +53,8 @@ export function CanvasStage() {
   return (
     <div
       ref={hostRef}
-      className="relative h-full min-h-0 w-full min-w-0 overflow-hidden rounded-md border border-shell-border bg-shell-bg"
+      // OPRAVA TADY: absolute inset-0 donutí div roztáhnout se po celém rodiči
+      className="absolute inset-0 w-full h-full overflow-hidden rounded-md border border-shell-border bg-shell-bg"
     />
   );
 }
