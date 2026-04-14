@@ -65,53 +65,138 @@ export function paintDab(
 ): void {
   const effSize = settings.size * sizeScale;
   if (effSize < 0.1) return; 
-
+  // Use cached stamp canvases to avoid creating radial gradients every dab.
   const hardness = settings.brushStyle === "pen" ? 1 : Math.min(1, Math.max(0, settings.hardness));
-  const radius = Math.max(0.1, effSize / 2);
-  
+
   const baseOpacity = Math.min(1, Math.max(0, settings.opacity));
   const dabOpacity = baseOpacity * settings.intensity * opacityScale;
 
-  const innerStop = hardness;
-  const innerAlpha = dabOpacity;
-  const outerAlpha = dabOpacity * (1 - hardness);
+  const color = activeColor || parseHexColor(settings.color);
 
-  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+  const stamp = getStamp({
+    size: Math.max(1, Math.round(effSize)),
+    hardness,
+    brushStyle: settings.brushStyle,
+    isEraser: settings.isEraser,
+    color,
+  });
 
-  ctx.save();
-  ctx.translate(x, y);
+  // Enqueue actual draw operations to batch them into RAF frames.
+  enqueueDraw(() => {
+    try {
+      ctx.save();
+      ctx.globalCompositeOperation = settings.isEraser ? 'destination-out' : (settings.brushStyle === 'marker' ? 'multiply' : 'source-over');
+      ctx.globalAlpha = dabOpacity;
 
-  if (settings.brushStyle === "marker") {
-    ctx.rotate(Math.PI / 4);
-    ctx.scale(1, 0.3);
+      const sw = stamp.width;
+      const sh = stamp.height;
+      ctx.drawImage(stamp, x - sw / 2, y - sh / 2, sw, sh);
+      ctx.restore();
+    } catch (e) {
+      // swallow drawing errors
+    }
+  });
+}
+
+// Stamp cache keyed by size/style/color/hardness
+const stampCache = new Map<string, HTMLCanvasElement>();
+
+function stampKey(opts: { size: number; hardness: number; brushStyle: string; isEraser: boolean; color: { r: number; g: number; b: number } }) {
+  return `${opts.brushStyle}|${opts.isEraser ? 'e' : 'n'}|${opts.size}|${Math.round(opts.hardness * 100)}|${Math.round(opts.color.r)}-${Math.round(opts.color.g)}-${Math.round(opts.color.b)}`;
+}
+
+function getStamp(opts: { size: number; hardness: number; brushStyle: string; isEraser: boolean; color: { r: number; g: number; b: number } }): HTMLCanvasElement {
+  const key = stampKey(opts);
+  const existing = stampCache.get(key);
+  if (existing) return existing;
+
+  const diameter = Math.max(1, Math.ceil(opts.size));
+  const radius = diameter / 2;
+  const canvas = document.createElement('canvas');
+  // add 2px padding for antialiasing
+  const pad = 4;
+  canvas.width = diameter + pad * 2;
+  canvas.height = diameter + pad * 2;
+  const c = canvas.getContext('2d');
+  if (!c) return canvas;
+
+  // center
+  c.translate(canvas.width / 2, canvas.height / 2);
+
+  if (opts.brushStyle === 'marker') {
+    c.rotate(Math.PI / 4);
+    c.scale(1, 0.3);
   }
 
-  if (settings.isEraser) {
-    ctx.globalCompositeOperation = "destination-out";
-    g.addColorStop(0, `rgba(0,0,0,${innerAlpha})`);
-    g.addColorStop(innerStop, `rgba(0,0,0,${innerAlpha})`);
-    g.addColorStop(1, `rgba(0,0,0,${outerAlpha})`);
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(0, 0, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+  const innerStop = opts.hardness;
+  // We'll bake relative alpha (1 and 1-hardness) then rely on ctx.globalAlpha when drawing
+  const innerAlpha = 1;
+  const outerAlpha = Math.max(0, 1 - opts.hardness);
+
+  const grad = c.createRadialGradient(0, 0, 0, 0, 0, radius);
+  if (opts.isEraser) {
+    grad.addColorStop(0, `rgba(0,0,0,${innerAlpha})`);
+    grad.addColorStop(innerStop, `rgba(0,0,0,${innerAlpha})`);
+    grad.addColorStop(1, `rgba(0,0,0,${outerAlpha})`);
+    c.fillStyle = grad;
+    c.beginPath();
+    c.arc(0, 0, radius, 0, Math.PI * 2);
+    c.fill();
+  } else {
+    const { r, g, b } = opts.color;
+    grad.addColorStop(0, `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${innerAlpha})`);
+    grad.addColorStop(innerStop, `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${innerAlpha})`);
+    grad.addColorStop(1, `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${outerAlpha})`);
+    c.fillStyle = grad;
+    c.beginPath();
+    c.arc(0, 0, radius, 0, Math.PI * 2);
+    c.fill();
+  }
+
+  stampCache.set(key, canvas);
+  return canvas;
+}
+
+// Drawing queue to batch draw calls into requestAnimationFrame
+const drawQueue: Array<() => void> = [];
+let drawRaf: number | null = null;
+let immediateMode = false;
+
+function enqueueDraw(fn: () => void) {
+  if (immediateMode) {
+    try { fn(); } catch (e) {}
     return;
   }
+  drawQueue.push(fn);
+  if (drawRaf === null) {
+    drawRaf = requestAnimationFrame(() => {
+      const q = drawQueue.splice(0, drawQueue.length);
+      drawRaf = null;
+      for (const f of q) {
+        try { f(); } catch (e) {}
+      }
+    });
+  }
+}
 
-  ctx.globalCompositeOperation = settings.brushStyle === "marker" ? "multiply" : "source-over";
+// Flush any queued draw operations synchronously (useful before starting a new stroke)
+export function flushDrawQueue(): void {
+  if (drawRaf !== null) {
+    try { cancelAnimationFrame(drawRaf); } catch(e) {}
+    drawRaf = null;
+  }
+  const q = drawQueue.splice(0, drawQueue.length);
+  for (const f of q) {
+    try { f(); } catch (e) {}
+  }
+}
 
-  const { r, g: gv, b } = activeColor || parseHexColor(settings.color);
-  g.addColorStop(0, `rgba(${Math.round(r)},${Math.round(gv)},${Math.round(b)},${innerAlpha})`);
-  g.addColorStop(innerStop, `rgba(${Math.round(r)},${Math.round(gv)},${Math.round(b)},${innerAlpha})`);
-  g.addColorStop(1, `rgba(${Math.round(r)},${Math.round(gv)},${Math.round(b)},${outerAlpha})`);
-  
-  ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.fill();
-  
-  ctx.restore();
+export function setImmediateMode(enabled: boolean) {
+  immediateMode = !!enabled;
+  if (immediateMode) {
+    // If enabling immediate mode, flush any queued draws first
+    flushDrawQueue();
+  }
 }
 
 function stampAlongSegment(
@@ -227,6 +312,7 @@ export class HighPerformanceBrushStroke {
   private strokeLength = 0;
   
   private wetColor: { r: number, g: number, b: number } | null = null;
+  private lastColorSampleAt = 0;
 
   constructor(tuning: Partial<BrushEngineTuning> = {}) {
     this.tuning = { ...DEFAULT_BRUSH_TUNING, ...tuning };
@@ -305,24 +391,38 @@ export class HighPerformanceBrushStroke {
     };
 
     if (settings.colorMix > 0 && !settings.isEraser) {
-      try {
-        const cx = Math.floor(drawTip.x);
-        const cy = Math.floor(drawTip.y);
-        const pixel = ctx.getImageData(cx, cy, 1, 1).data;
-        
-        if (pixel[3] > 10) { 
-          const mixRate = settings.colorMix * 0.15; 
-          this.wetColor.r += (pixel[0] - this.wetColor.r) * mixRate;
-          this.wetColor.g += (pixel[1] - this.wetColor.g) * mixRate;
-          this.wetColor.b += (pixel[2] - this.wetColor.b) * mixRate;
-        } else {
-          const orig = parseHexColor(settings.color);
-          const restoreRate = 0.02;
-          this.wetColor.r += (orig.r - this.wetColor.r) * restoreRate;
-          this.wetColor.g += (orig.g - this.wetColor.g) * restoreRate;
-          this.wetColor.b += (orig.b - this.wetColor.b) * restoreRate;
+      const now = sample.t || performance.now();
+      // throttle expensive per-pixel reads to ~80ms
+      if (now - this.lastColorSampleAt >= 80) {
+        this.lastColorSampleAt = now;
+        try {
+          const cx = Math.floor(drawTip.x);
+          const cy = Math.floor(drawTip.y);
+          const pixel = ctx.getImageData(cx, cy, 1, 1).data;
+
+          if (pixel[3] > 10) {
+            const mixRate = settings.colorMix * 0.15;
+            this.wetColor.r += (pixel[0] - this.wetColor.r) * mixRate;
+            this.wetColor.g += (pixel[1] - this.wetColor.g) * mixRate;
+            this.wetColor.b += (pixel[2] - this.wetColor.b) * mixRate;
+          } else {
+            const orig = parseHexColor(settings.color);
+            const restoreRate = 0.02;
+            this.wetColor.r += (orig.r - this.wetColor.r) * restoreRate;
+            this.wetColor.g += (orig.g - this.wetColor.g) * restoreRate;
+            this.wetColor.b += (orig.b - this.wetColor.b) * restoreRate;
+          }
+        } catch (e) {
+          // ignore
         }
-      } catch(e) {}
+      } else {
+        // gently restore towards the base color while skipping sampling
+        const orig = parseHexColor(settings.color);
+        const restoreRate = 0.02;
+        this.wetColor.r += (orig.r - this.wetColor.r) * restoreRate;
+        this.wetColor.g += (orig.g - this.wetColor.g) * restoreRate;
+        this.wetColor.b += (orig.b - this.wetColor.b) * restoreRate;
+      }
     } else {
       this.wetColor = parseHexColor(settings.color); 
     }

@@ -42,6 +42,7 @@ type LayerState = {
   canAddLayer: () => boolean;
   addLayer: () => boolean;
   deleteLayer: (id: string) => void;
+  renameLayer: (id: string, name: string) => void;
   setActiveLayer: (id: string) => void;
   toggleVisible: (id: string) => void;
   moveLayer: (id: string, direction: "up" | "down") => void;
@@ -74,9 +75,19 @@ export const useLayerStore = create<LayerState>((set, get) => ({
     if (!get().canAddLayer()) return false;
     const id = nanoid();
     set((s) => {
+      // Compute a next default name by scanning existing Layer N names
+      let maxN = 0;
+      for (const l of s.layers) {
+        const m = l.name.match(/^Layer\s+(\d+)$/);
+        if (m) {
+          const n = Number(m[1]);
+          if (n > maxN) maxN = n;
+        }
+      }
+      const nextIdx = maxN + 1 || s.layers.length + 1;
       const next: LayerMeta = {
         id,
-        name: defaultName(s.layers.length),
+        name: defaultName(nextIdx - 1),
         visible: true,
       };
       return {
@@ -96,6 +107,12 @@ export const useLayerStore = create<LayerState>((set, get) => ({
           : s.activeLayerId;
       return { layers, activeLayerId };
     });
+  },
+
+  renameLayer: (id: string, name: string) => {
+    set((s) => ({
+      layers: s.layers.map((l) => (l.id === id ? { ...l, name } : l)),
+    }));
   },
 
   setActiveLayer: (id) => set({ activeLayerId: id }),

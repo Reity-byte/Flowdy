@@ -3,6 +3,7 @@ import { useAppStore } from "./stores/appStore";
 import { useThemeStore } from "./stores/themeStore";
 
 import { CanvasStage } from "./components/CanvasStage";
+import { documentEngineRef } from "./engine/documentEngineRef";
 import { ColorPicker } from "./components/ColorPicker";
 import { LayerPanel } from "./components/LayerPanel";
 import { ToolPalette } from "./components/ToolPalette";
@@ -10,7 +11,7 @@ import { TopBar } from "./components/TopBar";
 import { Gallery } from "./components/Gallery";
 import { NewCanvasModal } from "./components/NewCanvasModal";
 import { ExportModal } from "./components/ExportModal";
-import { Toolbox } from "./components/Toolbox"; // NOVÝ IMPORT!
+import { Toolbox } from "./components/Toolbox";
 
 export default function App() {
   const currentScreen = useAppStore((s) => s.currentScreen);
@@ -21,13 +22,13 @@ export default function App() {
   const { activeTheme, customColors, setTheme, setCustomColor } = useThemeStore();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
-  // NOVÉ: Stav pro Zen/Focus mód
+  // FOCUS MÓD (Zen mód)
   const [isFocusMode, setIsFocusMode] = useState(false);
 
   const canvasWidth = useAppStore((s) => s.canvasWidth);
   const canvasHeight = useAppStore((s) => s.canvasHeight);
 
-  // NOVÉ: Klávesová zkratka Tab pro přepnutí Focus módu
+  // Klávesová zkratka Tab pro přepnutí Focus módu
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Tab') {
@@ -38,6 +39,21 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // Ensure the canvas resizes immediately when focus mode changes
+  useEffect(() => {
+    // Call resize immediately and a few times afterwards (staggered)
+    // so we catch the host size both before/during/after the CSS transition.
+    try { documentEngineRef.current?.forceResize(); } catch {}
+
+    const timers: number[] = [];
+    timers.push(window.setTimeout(() => { try { documentEngineRef.current?.forceResize(); } catch {} }, 80));
+    timers.push(window.setTimeout(() => { try { documentEngineRef.current?.forceResize(); } catch {} }, 200));
+    // After CSS transition duration (500ms) + small buffer
+    timers.push(window.setTimeout(() => { try { documentEngineRef.current?.forceResize(); } catch {} }, 560));
+
+    return () => timers.forEach((t) => clearTimeout(t));
+  }, [isFocusMode]);
 
   useEffect(() => {
     const html = document.documentElement;
@@ -68,13 +84,17 @@ export default function App() {
               ⚙️ Settings
             </button>
           </div>
+          {/* Fullscreen-capable focus overlay */}
+          {isFocusMode && (
+            <div aria-hidden="true" className="fixed inset-0 bg-shell-panel opacity-90 z-40 pointer-events-none transition-opacity" />
+          )}
           <Gallery />
           <NewCanvasModal />
         </div>
       ) : (
         <div className="flex h-full flex-col overflow-hidden relative">
           
-          {/* Plovoucí tlačítko Focus módu (viditelné hlavně když se schová horní lišta) */}
+          {/* Plovoucí tlačítko Focus módu */}
           <button 
             onClick={() => setIsFocusMode(!isFocusMode)}
             className={`absolute z-50 px-3 py-1.5 bg-shell-panel border border-shell-border rounded-lg shadow-lg hover:brightness-110 transition-all font-bold text-xs tracking-wider opacity-50 hover:opacity-100 ${isFocusMode ? 'top-4 right-4' : 'top-4 right-[280px]'}`}
@@ -83,16 +103,15 @@ export default function App() {
             {isFocusMode ? "⤡ Show UI" : "⤢ Focus"}
           </button>
 
-          {/* HORNÍ LIŠTA: Vyjede nahoru */}
+          {/* HORNÍ LIŠTA */}
           <div className={`transition-all duration-500 ease-in-out ${isFocusMode ? '-mt-20 opacity-0' : 'mt-0 opacity-100'}`}>
             <TopBar />
           </div>
 
-          {/* KONTEJNER PRO PANELY: Dynamický gap zajistí, že po zmizení panelů nezbydou prázdné díry */}
           <div className={`flex min-h-0 flex-1 p-4 overflow-hidden transition-all duration-500 ease-in-out ${isFocusMode ? 'gap-0' : 'gap-4'}`}>
             
-            {/* LEVÝ PANEL: Animace šířky do nuly */}
-            <div className={`transition-all duration-500 ease-in-out overflow-hidden ${isFocusMode ? 'w-0 opacity-0' : 'w-64 opacity-100'}`}>
+            {/* LEVÝ PANEL - OPRAVA: Přidáno min-w-0, aby se kontejner opravdu smrskl na 0px */}
+            <div className={`transition-all duration-500 ease-in-out overflow-hidden min-w-0 ${isFocusMode ? 'w-0 opacity-0' : 'w-64 opacity-100'}`}>
               <aside className="w-64 shrink-0 flex flex-col gap-4 overflow-y-auto custom-scrollbar pr-1 h-full">
                 <Drawer title="🎨 Brush Settings" defaultOpen={true}>
                   <ToolPalette />
@@ -103,7 +122,7 @@ export default function App() {
               </aside>
             </div>
 
-            {/* STŘED (Plátno): Automaticky se roztáhne do uvolněného prostoru */}
+            {/* STŘED (Plátno) */}
             <main className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 relative">
               <p className={`shrink-0 text-xs font-medium opacity-50 text-center tracking-wide transition-opacity ${isFocusMode ? 'opacity-0 h-0 overflow-hidden' : 'opacity-50'}`}>
                 Artboard {canvasWidth}×{canvasHeight}px
@@ -113,9 +132,9 @@ export default function App() {
               </div>
             </main>
 
-            {/* PRAVÝ PANEL: Animace šířky do nuly */}
-            <div className={`transition-all duration-500 ease-in-out overflow-hidden ${isFocusMode ? 'w-0 opacity-0' : 'w-64 opacity-100'}`}>
-              <aside className="w-64 shrink-0 flex flex-col gap-4 overflow-y-auto custom-scrollbar pl-1 h-full">
+            {/* PRAVÝ PANEL - OPRAVA: Přidáno min-w-0 */}
+            <div className={`transition-all duration-500 ease-in-out overflow-hidden min-w-0 ${isFocusMode ? 'w-0 opacity-0' : 'w-80 opacity-100'}`}>
+              <aside className="w-80 shrink-0 flex flex-col gap-4 overflow-y-auto custom-scrollbar pl-1 h-full">
                 <Drawer title="📚 Layers" defaultOpen={true}>
                   <LayerPanel />
                 </Drawer>
@@ -124,6 +143,7 @@ export default function App() {
                 </Drawer>
               </aside>
             </div>
+
           </div>
         </div>
       )}
@@ -136,9 +156,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Nastavení (bez změny) ... */}
       {isSettingsOpen && currentScreen === "gallery" && (
-        /* ... Zbytek tvého kódu s modálem nastavení ... */
         <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm">
           <div className="bg-shell-panel border border-shell-border p-6 rounded-2xl w-96 shadow-2xl">
             <div className="flex justify-between items-center mb-6">
@@ -169,9 +187,7 @@ export default function App() {
   );
 }
 
-// Tyto komponenty nechej tak, jak jsou z minula
 function Drawer({ title, children, defaultOpen = true }: { title: string, children: React.ReactNode, defaultOpen?: boolean }) {
-  /* ... z minula ... */
   const [isOpen, setIsOpen] = useState(defaultOpen);
   return (
     <div className="flex flex-col rounded-xl border border-shell-border bg-shell-panel shrink-0 shadow-sm">

@@ -4,7 +4,7 @@ import { useAppStore } from "../stores/appStore";
 import { useHistoryStore, type DocumentSnapshot } from "../stores/historyStore";
 import { useEditorStore } from "../stores/editorStore";
 import { useLayerStore, type LayerMeta } from "../stores/layerStore";
-import { brushSettingsForTool, HighPerformanceBrushStroke } from "./brushEngine";
+import { brushSettingsForTool, HighPerformanceBrushStroke, flushDrawQueue, setImmediateMode } from "./brushEngine";
 import { SelectionManager } from "./SelectionManager";
 
 // OPRAVA TADY: Přidali jsme BrushSettings do importu
@@ -33,8 +33,32 @@ function makeLayerSurface(w: number, h: number): {
 }
 
 function updateCanvasTexture(sprite: Sprite): void {
-  const src = sprite.texture.source;
-  src.update();
+  try {
+    const res = sprite.texture.baseTexture.resource as any;
+    const src = res?.source;
+    // If source is a canvas and createImageBitmap is available, upload async
+    if (typeof createImageBitmap !== 'undefined' && src && src instanceof HTMLCanvasElement) {
+      // Capture reference to old texture to destroy after replacement
+      const oldTex = sprite.texture;
+      createImageBitmap(src).then((bmp) => {
+        try {
+          const newTex = Texture.from(bmp);
+          sprite.texture = newTex;
+          try { oldTex.destroy(true); } catch {}
+        } catch (e) {
+          // fallback to forcing update
+          try { (sprite.texture.source as any).update(); } catch {}
+        }
+      }).catch(() => {
+        try { (sprite.texture.source as any).update(); } catch {}
+      });
+    } else {
+      // Fallback: synchronous update (canvas resource)
+      try { (sprite.texture.source as any).update(); } catch {}
+    }
+  } catch (e) {
+    try { (sprite.texture.source as any).update(); } catch {}
+  }
 }
 
 export class DocumentCanvas {
@@ -119,6 +143,201 @@ export class DocumentCanvas {
     // Globální event listenery pro klávesnici (lepší zachycení zkratek)
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
+  }
+
+  // Force a synchronous resize to match the host element's CSS size.
+  // Useful when surrounding layout changes (animations/transition) don't
+  // immediately trigger PIXI's ResizeObserver or when we need an explicit refresh.
+  public forceResize(): void {
+    if (!this.app) return;
+    const w = Math.max(0, this.host.clientWidth);
+    const h = Math.max(0, this.host.clientHeight);
+    try {
+      this.app.renderer.resize(w, h);
+      const canvas = this.app.view as HTMLCanvasElement;
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+    } catch (e) {
+      // ignore resize errors
+    }
+  }
+
+  // Merge the specified layer down into the layer below it (if any).
+  // This composites the pixel backing stores and removes the upper layer from
+  // the runtime and the layer store metadata.
+  public mergeLayerDown(id: string): void {
+    const layers = useLayerStore.getState().layers;
+    const idx = layers.findIndex((l) => l.id === id);
+    if (idx <= 0) return; // nothing below to merge into
+
+    const below = layers[idx - 1];
+    const src = this.runtimes.get(id);
+    const dst = this.runtimes.get(below.id);
+    if (!dst) {
+      // If destination missing, just remove metadata
+      useLayerStore.getState().deleteLayer(id);
+      return;
+    }
+
+    if (src) {
+      try {
+        const sw = src.canvas.width;
+        const sh = src.canvas.height;
+        const dw = dst.canvas.width;
+        const dh = dst.canvas.height;
+        if (sw !== dw || sh !== dh) {
+          console.warn('mergeLayerDown: source/dest canvas size mismatch', { id, sw, sh, dw, dh });
+        }
+        dst.ctx.save();
+        dst.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        dst.ctx.globalCompositeOperation = 'source-over';
+        dst.ctx.drawImage(src.canvas, 0, 0, sw, sh, 0, 0, dw, dh);
+        dst.ctx.restore();
+        updateCanvasTexture(dst.sprite);
+      } catch (e) {
+        console.error('mergeLayerDown draw failed', e);
+      }
+
+      // Clean up the source runtime
+      try { src.sprite.destroy(); } catch {}
+      this.runtimes.delete(id);
+    }
+
+    // Remove metadata and sync engine state, then set active to the layer we merged into
+    useLayerStore.getState().deleteLayer(id);
+    this.syncLayers(useLayerStore.getState().layers);
+    useLayerStore.getState().setActiveLayer(below.id);
+  }
+
+  // Merge the specified layer up into the layer above it (if any).
+  public mergeLayerUp(id: string): void {
+    const layers = useLayerStore.getState().layers;
+    const idx = layers.findIndex((l) => l.id === id);
+    if (idx < 0 || idx >= layers.length - 1) return; // nothing above to merge into
+
+    const above = layers[idx + 1];
+    const src = this.runtimes.get(id);
+    const dst = this.runtimes.get(above.id);
+    if (!dst) {
+      useLayerStore.getState().deleteLayer(id);
+      return;
+    }
+
+    if (src) {
+      try {
+        const sw = src.canvas.width;
+        const sh = src.canvas.height;
+        const dw = dst.canvas.width;
+        const dh = dst.canvas.height;
+        if (sw !== dw || sh !== dh) {
+          console.warn('mergeLayerUp: source/dest canvas size mismatch', { id, sw, sh, dw, dh });
+        }
+        dst.ctx.save();
+        dst.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        dst.ctx.globalCompositeOperation = 'source-over';
+        dst.ctx.drawImage(src.canvas, 0, 0, sw, sh, 0, 0, dw, dh);
+        dst.ctx.restore();
+        updateCanvasTexture(dst.sprite);
+      } catch (e) {
+        console.error('mergeLayerUp draw failed', e);
+      }
+
+      try { src.sprite.destroy(); } catch {}
+      this.runtimes.delete(id);
+    }
+
+    useLayerStore.getState().deleteLayer(id);
+    this.syncLayers(useLayerStore.getState().layers);
+    useLayerStore.getState().setActiveLayer(above.id);
+  }
+
+  // Flatten all layers into a single bottom-most layer. Preserves bottom layer id.
+  public flattenAll(): void {
+    const layers = useLayerStore.getState().layers;
+    if (layers.length <= 1) return;
+
+    const bottom = layers[0];
+    const dst = this.runtimes.get(bottom.id);
+    if (!dst) return;
+
+    // Merge each layer into bottom from top to bottom+1
+    for (let i = layers.length - 1; i >= 1; i--) {
+      const id = layers[i].id;
+      const src = this.runtimes.get(id);
+      if (src) {
+        try {
+          const sw = src.canvas.width;
+          const sh = src.canvas.height;
+          const dw = dst.canvas.width;
+          const dh = dst.canvas.height;
+          if (sw !== dw || sh !== dh) {
+            console.warn('flattenAll: source/dest canvas size mismatch', { id, sw, sh, dw, dh });
+          }
+          dst.ctx.save();
+          dst.ctx.setTransform(1, 0, 0, 1, 0, 0);
+          dst.ctx.globalCompositeOperation = 'source-over';
+          dst.ctx.drawImage(src.canvas, 0, 0, sw, sh, 0, 0, dw, dh);
+          dst.ctx.restore();
+          updateCanvasTexture(dst.sprite);
+        } catch (e) {
+          console.error('flatten draw failed', e);
+        }
+
+        try { src.sprite.destroy(); } catch {}
+        this.runtimes.delete(id);
+      }
+      useLayerStore.getState().deleteLayer(id);
+    }
+    this.syncLayers(useLayerStore.getState().layers);
+    useLayerStore.getState().setActiveLayer(bottom.id);
+  }
+
+  // Merge an array of layer ids into the lowest-index selected layer.
+  public mergeSelected(ids: string[]): void {
+    const layers = useLayerStore.getState().layers;
+    if (!ids || ids.length <= 1) return;
+
+    // Map ids to indices and sort descending so we draw higher indices first
+    const byIndex = ids
+      .map((id) => ({ id, idx: layers.findIndex((l) => l.id === id) }))
+      .filter((x) => x.idx >= 0)
+      .sort((a, b) => a.idx - b.idx);
+    if (byIndex.length <= 1) return;
+
+    const target = byIndex[0].id; // lowest index -> destination
+    const dst = this.runtimes.get(target);
+    if (!dst) return;
+
+    // merge others into target (from highest to lowest to preserve stacking)
+    for (let i = byIndex.length - 1; i >= 1; i--) {
+      const sid = byIndex[i].id;
+      const src = this.runtimes.get(sid);
+      if (src) {
+        try {
+          const sw = src.canvas.width;
+          const sh = src.canvas.height;
+          const dw = dst.canvas.width;
+          const dh = dst.canvas.height;
+          if (sw !== dw || sh !== dh) {
+            console.warn('mergeSelected: source/dest canvas size mismatch', { sid, sw, sh, dw, dh });
+          }
+          dst.ctx.save();
+          dst.ctx.setTransform(1, 0, 0, 1, 0, 0);
+          dst.ctx.globalCompositeOperation = 'source-over';
+          dst.ctx.drawImage(src.canvas, 0, 0, sw, sh, 0, 0, dw, dh);
+          dst.ctx.restore();
+          updateCanvasTexture(dst.sprite);
+        } catch (e) {
+          console.error('mergeSelected draw failed', e);
+        }
+
+        try { src.sprite.destroy(); } catch {}
+        this.runtimes.delete(sid);
+      }
+      useLayerStore.getState().deleteLayer(sid);
+    }
+    this.syncLayers(useLayerStore.getState().layers);
+    useLayerStore.getState().setActiveLayer(target);
   }
 
   destroy(): void {
@@ -423,6 +642,9 @@ private onPointerDown = (e: PointerEvent): void => {
 
     if (this.isPinching || e.button !== 0) return;
 
+    // Ensure any pending batched draw ops are flushed before starting a new stroke
+    try { flushDrawQueue(); } catch {}
+
     const world = this.screenToWorld(e.clientX, e.clientY);
     const tool = useEditorStore.getState().tool;
     
@@ -448,6 +670,7 @@ private onPointerDown = (e: PointerEvent): void => {
     this.brush.down(ctx, this.pointerSample(e, world), settings);
     const rt = this.getActiveRuntime();
     if (rt) updateCanvasTexture(rt.sprite);
+    try { setImmediateMode(true); } catch {}
   };
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -537,6 +760,8 @@ private onPointerDown = (e: PointerEvent): void => {
       
       // Důležité: Překreslíme vrstvu, protože jsme z ní vyřízli (nebo do ní vlepili) pixely
       const rt = this.getActiveRuntime();
+      // Ensure any queued draws are flushed before updating texture
+      try { flushDrawQueue(); } catch {}
       if (rt) updateCanvasTexture(rt.sprite);
       
       try { (this.app?.canvas as HTMLCanvasElement)?.releasePointerCapture(e.pointerId); } catch {}
@@ -549,6 +774,8 @@ private onPointerDown = (e: PointerEvent): void => {
       const world = this.screenToWorld(e.clientX, e.clientY);
       if (ctx && this.stroking) {
         this.brush.flush(ctx, this.pointerSample(e, world), this.getBrushSettings());
+        // Ensure flush draws are executed before we snapshot/update
+        try { flushDrawQueue(); } catch {}
         const rt = this.getActiveRuntime();
         if (rt) updateCanvasTexture(rt.sprite);
       }
@@ -558,6 +785,7 @@ private onPointerDown = (e: PointerEvent): void => {
         this.stroking = false;
         this.onStrokeCommitted?.();
       }
+      try { setImmediateMode(false); } catch {}
     }
   };
 
