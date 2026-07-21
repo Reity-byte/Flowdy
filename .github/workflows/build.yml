@@ -17,6 +17,14 @@ jobs:
         platform: [macos-latest, windows-latest]
 
     runs-on: ${{ matrix.platform }}
+    # For a matrix job, GitHub Actions takes a job output's value from
+    # whichever matrix leg finishes last — fine here, since both legs
+    # create-or-reuse the SAME tagged release, so releaseId is identical
+    # either way. build-android reads this to upload directly by release ID
+    # instead of looking the release up by tag again (see that job's own
+    # comment for why that specific operation is the one that kept failing).
+    outputs:
+      release_id: ${{ steps.tauri_build.outputs.releaseId }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,6 +42,7 @@ jobs:
         run: npm ci
 
       - name: Build Desktop Application
+        id: tauri_build
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -87,13 +96,6 @@ jobs:
       - name: Install NPM dependencies
         run: npm ci
 
-      - name: Read app version
-        id: version
-        # Same source tauri-action reads for the desktop job's v__VERSION__
-        # tag (package.json), so both jobs land assets on the SAME release
-        # instead of two disconnected drafts.
-        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-
       - name: Regenerate icons
         # Refreshes src-tauri/icons/{android,ios,...} from the source icon.
         # Must run BEFORE `tauri android init` so the freshly-scaffolded
@@ -125,17 +127,35 @@ jobs:
           if-no-files-found: error
 
       - name: Upload APK to Release
-        uses: softprops/action-gh-release@v2
+        # Every previous approach here (softprops/action-gh-release, both
+        # via env: GITHUB_TOKEN and the documented with: token: input) hit
+        # "Resource not accessible by integration" specifically on the
+        # get-release-by-tag + update-release calls needed to attach an
+        # asset to a release a DIFFERENT job/tool already created — reliably
+        # reproduced across three separate runs, ruling out both a race
+        # (build-android already runs strictly after build-desktop) and the
+        # repo's Workflow permissions setting (confirmed already "Read and
+        # write"). Sidestepping the mystery entirely: upload straight to the
+        # release's numeric ID (from build-desktop's tauri-action output),
+        # which needs no tag lookup and no "edit this release" call at all —
+        # just the same "upload a release asset" endpoint tauri-action
+        # itself already uses successfully for the desktop bundles.
         if: startsWith(github.ref, 'refs/heads/main')
-        with:
-          # `env: GITHUB_TOKEN` is this action's deprecated legacy input path
-          # (its own README now says so explicitly) — it's what caused
-          # "Resource not accessible by integration" when updating the
-          # existing draft release tauri-action already created, across two
-          # separate runs (confirmed not a race: still failed even after
-          # sequencing build-android strictly after build-desktop). The
-          # documented current input is `token:`.
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ steps.version.outputs.tag }}
-          files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.build-desktop.outputs.release_id }}
+        run: |
+          set -e
+          if [ -z "$RELEASE_ID" ]; then
+            echo "::error::build-desktop did not report a release_id — nothing to upload to."
+            exit 1
+          fi
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | while read -r f; do
+            name=$(basename "$f")
+            echo "Uploading $name to release $RELEASE_ID"
+            curl -sSL -f -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Content-Type: application/vnd.android.package-archive" \
+              --data-binary @"$f" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$name"
+          done
