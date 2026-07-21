@@ -127,9 +127,15 @@ jobs:
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/heads/main')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # `env: GITHUB_TOKEN` is this action's deprecated legacy input path
+          # (its own README now says so explicitly) — it's what caused
+          # "Resource not accessible by integration" when updating the
+          # existing draft release tauri-action already created, across two
+          # separate runs (confirmed not a race: still failed even after
+          # sequencing build-android strictly after build-desktop). The
+          # documented current input is `token:`.
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ steps.version.outputs.tag }}
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           draft: true
