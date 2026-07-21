@@ -30,14 +30,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies (Ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
-
       - name: Install NPM dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build Desktop Application
         uses: tauri-apps/tauri-action@v0
@@ -86,15 +80,28 @@ jobs:
         run: yes | sdkmanager --licenses || true
 
       - name: Install NPM dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Tauri Android Init and Icons
-        # Spustí se pouze pokud složka gen/android neexistuje
+      - name: Read app version
+        id: version
+        # Same source tauri-action reads for the desktop job's v__VERSION__
+        # tag (package.json), so both jobs land assets on the SAME release
+        # instead of two disconnected drafts.
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate icons
+        # Refreshes src-tauri/icons/{android,ios,...} from the source icon.
+        # Must run BEFORE `tauri android init` so the freshly-scaffolded
+        # Android project picks up current icons instead of whatever was
+        # already committed in src-tauri/icons/android.
+        run: npx tauri icon icon.png
+
+      - name: Tauri Android Init
+        # Only needed if the generated project isn't already checked in.
         run: |
           if [ ! -d "src-tauri/gen/android" ]; then
             npx tauri android init
           fi
-          npx tauri icon icon.png
 
       - name: Build Android APK
         run: npx tauri android build --debug
@@ -107,6 +114,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v0.4.4 # Upravte dle potřeby nebo použijte dynamické tagování
+          tag_name: ${{ steps.version.outputs.tag }}
           files: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           draft: true
