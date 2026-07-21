@@ -46,6 +46,11 @@ jobs:
 
   # 2. JOB: Android
   build-android:
+    # Waits for build-desktop so its release-upload step never races
+    # tauri-action's own create/update of the same v__VERSION__ release —
+    # that race is what caused "Resource not accessible by integration" on
+    # softprops/action-gh-release's update call in an earlier run.
+    needs: build-desktop
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -107,6 +112,17 @@ jobs:
         run: npx tauri android build --debug
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+      - name: Upload APK as workflow artifact
+        # Doesn't touch the Releases API at all, so it can't fail for the
+        # same reason the release-upload step below can — a guaranteed way
+        # to grab the APK from this run's "Artifacts" section regardless of
+        # what happens to the release attach. Kept 90 days (GitHub default).
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowdy-android-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
 
       - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
