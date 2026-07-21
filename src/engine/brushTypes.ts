@@ -1,6 +1,6 @@
 // src/engine/brushTypes.ts
-export type EditorTool = "brush" | "eraser" | "select";
-export type BrushStyle = "round" | "pen" | "marker";
+export type EditorTool = "brush" | "eraser" | "select" | "blur" | "smudge" | "fill" | "ruler";
+export type BrushStyle = "round" | "pen" | "marker" | "textured" | "blur" | "smudge";
 
 export type BrushSettings = {
   size: number;
@@ -13,6 +13,10 @@ export type BrushSettings = {
   endTaper: number;
   colorMix: number;
   brushStyle: BrushStyle; // NOVÉ
+  /** When true, painting is clipped to the active layer's existing alpha (ibis Paint/Photoshop "Alpha Lock" / "Lock Transparent Pixels"). */
+  alphaLocked: boolean;
+  /** Smudge tool only: how strongly each dab drags/deposits the carried patch. Unused by every other brush style. */
+  smudgeStrength: number;
 };
 
 export type Point = { x: number; y: number };

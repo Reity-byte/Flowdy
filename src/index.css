@@ -11,13 +11,15 @@
   --shell-text: #FFFFFF;    /* Bílý text pro perfektní čitelnost na tmavém pozadí */
 }
 
-/* TMAVÉ TÉMA */
+/* TMAVÉ TÉMA — výchozí. Neutrální černo-šedá (ne fialová), jeden zdrženlivý
+   modrý akcent — blíž skutečnému vzhledu Procreate než předchozí Catppuccin
+   paleta s fialovým nádechem. */
 html[data-theme="dark"] {
-  --shell-bg: #11111b;
-  --shell-panel: #181825;
-  --shell-accent: #89b4fa;
-  --shell-border: #313244;
-  --shell-text: #cdd6f4;
+  --shell-bg: #18181b;
+  --shell-panel: #232327;
+  --shell-accent: #3b82f6;
+  --shell-border: #3a3a40;
+  --shell-text: #f4f4f5;
 }
 
 /* SVĚTLÉ TÉMA */
@@ -29,6 +31,18 @@ html[data-theme="light"] {
   --shell-text: #0f172a;    /* Téměř černá písmenka pro čitelnost */
 }
 
+/* `#root`'s `height: 100%` only resolves against the real viewport if EVERY
+   ancestor up to <html> also has an explicit (non-auto) height — otherwise
+   percentage heights silently fall back to being sized by content instead.
+   Without this, the app's height "looked" viewport-filling by coincidence
+   (content was normally tall enough to match/exceed the viewport), but any
+   time content got shorter — e.g. collapsing a sidebar Drawer — the whole
+   auto-sized chain (including the canvas frame, several levels up) would
+   shrink to match, since nothing was actually anchored to the viewport. */
+html, body {
+  height: 100%;
+}
+
 #root {
   height: 100%;
   margin: 0;
@@ -38,5 +52,8 @@ html[data-theme="light"] {
 body {
   color: var(--shell-text);
   background-color: var(--shell-bg);
-  @apply antialiased transition-colors duration-300;
+  @apply antialiased transition-colors duration-300 font-sans;
+  /* Inter reads slightly loose at UI sizes at its default spacing — a touch
+     tighter matches how dense creative-tool chrome (Figma, Linear) sets it. */
+  letter-spacing: -0.011em;
 }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAppStore } from "../stores/appStore";
+import { Button } from "./Button";
 
 const PRESETS = [
   { name: "Square", width: 2048, height: 2048 },
@@ -20,58 +21,68 @@ export function NewCanvasModal() {
   if (!isOpen) return null;
 
   const handleCreate = (w: number, h: number) => {
-    void openEditor(undefined, w, h);
+    const width = Math.round(w);
+    const height = Math.round(h);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 64 || width > 8192 || height < 64 || height > 8192) {
+      useAppStore.getState().showNotification("Size must be 64–8192 px");
+      return;
+    }
+    void openEditor(undefined, width, height);
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-shell-border bg-shell-panel p-6 shadow-2xl">
+      <div className="w-full max-w-md rounded-2xl border border-shell-border bg-shell-panel p-6 shadow-2xl">
         <h2 className="mb-4 text-xl font-bold text-white">Create New Canvas</h2>
-        
+
         <div className="flex flex-col gap-2 mb-6">
           {!useCustom && PRESETS.map((preset) => (
-            <button
+            <Button
               key={preset.name}
+              variant="secondary"
               onClick={() => handleCreate(preset.width, preset.height)}
-              className="flex justify-between items-center w-full rounded-lg border border-shell-border bg-shell-bg p-3 hover:border-shell-accent hover:bg-slate-800 transition text-left"
+              className="w-full justify-between p-3 text-left"
             >
               <span className="font-semibold text-white">{preset.name}</span>
               <span className="text-xs text-slate-400">{preset.width} x {preset.height} px</span>
-            </button>
+            </Button>
           ))}
 
-          <button
+          <Button
+            variant="secondary"
+            pressed={useCustom}
             onClick={() => setUseCustom(!useCustom)}
-            className={`flex justify-between items-center w-full rounded-lg border p-3 transition text-left ${useCustom ? 'border-shell-accent bg-shell-bg' : 'border-shell-border bg-shell-bg hover:bg-slate-800'}`}
+            className="w-full justify-between p-3 text-left"
           >
             <span className="font-semibold text-white">Custom Size</span>
             <span className="text-xs text-slate-400">Configure</span>
-          </button>
+          </Button>
 
           {useCustom && (
             <div className="flex gap-3 p-3 border border-shell-border rounded-lg bg-shell-bg">
               <div className="flex-1">
                 <label className="text-xs text-slate-400 block mb-1">Width (px)</label>
-                <input type="number" value={customW} onChange={(e) => setCustomW(Number(e.target.value))} className="w-full bg-shell-panel border border-slate-700 rounded p-2 text-white outline-none focus:border-shell-accent" />
+                <input type="number" min={64} max={8192} value={customW} onChange={(e) => setCustomW(Number(e.target.value))} className="w-full bg-shell-panel border border-slate-700 rounded p-2 text-white outline-none focus:border-shell-accent" />
               </div>
               <div className="flex-1">
                 <label className="text-xs text-slate-400 block mb-1">Height (px)</label>
-                <input type="number" value={customH} onChange={(e) => setCustomH(Number(e.target.value))} className="w-full bg-shell-panel border border-slate-700 rounded p-2 text-white outline-none focus:border-shell-accent" />
+                <input type="number" min={64} max={8192} value={customH} onChange={(e) => setCustomH(Number(e.target.value))} className="w-full bg-shell-panel border border-slate-700 rounded p-2 text-white outline-none focus:border-shell-accent" />
               </div>
-              <button onClick={() => handleCreate(customW, customH)} className="self-end bg-shell-accent text-white px-4 py-2 rounded font-semibold hover:brightness-110">Create</button>
+              <Button variant="primary" onClick={() => handleCreate(customW, customH)} className="self-end px-4 py-2 font-semibold">Create</Button>
             </div>
           )}
         </div>
 
-        <button
+        <Button
+          variant="secondary"
           onClick={() => {
             setUseCustom(false);
             togglePopup(false);
           }}
-          className="w-full rounded-lg border border-shell-border bg-shell-bg py-2 text-slate-300 hover:bg-slate-800"
+          className="w-full py-2"
         >
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );

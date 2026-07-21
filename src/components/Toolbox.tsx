@@ -1,32 +1,95 @@
+import { Paintbrush, Eraser, MousePointer2, Square, Lasso, Droplet, Fingerprint, PaintBucket, Ruler, Slash, Circle, X } from "lucide-react";
 import { useEditorStore } from "../stores/editorStore";
+import { documentEngineRef } from "../engine/documentEngineRef";
+import type { EditorTool } from "../engine/brushTypes";
+import { IconButton } from "./Button";
 
+const TOOLS: { id: EditorTool; icon: typeof Paintbrush; name: string }[] = [
+  { id: "brush", icon: Paintbrush, name: "Brush" },
+  { id: "eraser", icon: Eraser, name: "Eraser" },
+  { id: "select", icon: MousePointer2, name: "Select" },
+  { id: "blur", icon: Droplet, name: "Blur" },
+  { id: "smudge", icon: Fingerprint, name: "Smudge" },
+  { id: "fill", icon: PaintBucket, name: "Fill" },
+  { id: "ruler", icon: Ruler, name: "Ruler" },
+];
+
+/** Always-visible vertical tool rail — one tap to switch tools, no overlay
+ * needed (per Section 11's ibis-Paint-derived layout: switching the active
+ * tool is too frequent an action to hide behind a sheet). Lives in the
+ * left rail in `App.tsx`; the Rectangle/Lasso sub-mode row appears directly
+ * beneath it only while Select is active. */
 export function Toolbox() {
   const tool = useEditorStore((s) => s.tool);
   const setTool = useEditorStore((s) => s.setTool);
-
-  // Můžeš si sem v budoucnu jednoduše přidávat další nástroje
-  const tools = [
-    { id: "brush", icon: "🖌", name: "Brush" },
-    { id: "eraser", icon: "🧹", name: "Eraser" },
-    { id: "select", icon: "⬚", name: "Select" },
-  ];
+  const selectMode = useEditorStore((s) => s.selectMode);
+  const setSelectMode = useEditorStore((s) => s.setSelectMode);
+  const rulerType = useEditorStore((s) => s.rulerType);
+  const setRulerType = useEditorStore((s) => s.setRulerType);
 
   return (
-    <div className="grid grid-cols-3 gap-2">
-      {tools.map((t) => (
-        <button
+    <div className="flex flex-col items-center gap-1.5">
+      {TOOLS.map((t) => (
+        <IconButton
           key={t.id}
-          onClick={() => setTool(t.id as any)}
-          className={`p-3 rounded-lg flex flex-col items-center justify-center gap-1.5 transition-colors ${
-            tool === t.id 
-              ? "bg-blue-600 text-white shadow-inner" 
-              : "bg-shell-bg hover:bg-shell-border"
-          }`}
+          label={t.name}
+          pressed={tool === t.id}
+          onClick={() => setTool(t.id)}
+          className="h-11 w-11 p-0"
         >
-          <span className="text-2xl">{t.icon}</span>
-          <span className="text-[10px] uppercase font-bold tracking-wider">{t.name}</span>
-        </button>
+          <t.icon size={20} strokeWidth={1.75} />
+        </IconButton>
       ))}
+
+      {tool === "select" && (
+        <div className="flex flex-col gap-1.5 border-t border-shell-border pt-1.5">
+          <IconButton
+            label="Rectangle marquee — drag a straight-edged box"
+            pressed={selectMode === "rect"}
+            onClick={() => setSelectMode("rect")}
+            className="h-11 w-11 p-0"
+          >
+            <Square size={18} strokeWidth={2} />
+          </IconButton>
+          <IconButton
+            label="Lasso — freehand-trace an irregular selection"
+            pressed={selectMode === "lasso"}
+            onClick={() => setSelectMode("lasso")}
+            className="h-11 w-11 p-0"
+          >
+            <Lasso size={18} strokeWidth={2} />
+          </IconButton>
+        </div>
+      )}
+
+      {tool === "ruler" && (
+        <div className="flex flex-col gap-1.5 border-t border-shell-border pt-1.5">
+          <IconButton
+            label="Straight ruler — snap strokes to a straight edge"
+            pressed={rulerType === "straight"}
+            onClick={() => setRulerType("straight")}
+            className="h-11 w-11 p-0"
+          >
+            <Slash size={18} strokeWidth={2} />
+          </IconButton>
+          <IconButton
+            label="Circular ruler — snap strokes to a circle"
+            pressed={rulerType === "circular"}
+            onClick={() => setRulerType("circular")}
+            className="h-11 w-11 p-0"
+          >
+            <Circle size={18} strokeWidth={2} />
+          </IconButton>
+          <IconButton
+            label="Clear ruler"
+            pressed={false}
+            onClick={() => documentEngineRef.current?.clearRuler()}
+            className="h-11 w-11 p-0"
+          >
+            <X size={18} strokeWidth={2} />
+          </IconButton>
+        </div>
+      )}
     </div>
   );
 }

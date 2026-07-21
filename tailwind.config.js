@@ -14,6 +14,12 @@ module.exports = {
         'shell-border': 'var(--shell-border)',
         'shell-text': 'var(--shell-text)',
       },
+      fontFamily: {
+        // Self-hosted via @fontsource (see main.tsx) — no external request,
+        // matches the app's offline-friendly Tauri nature. Falls through to
+        // the system stack if the webfont hasn't loaded yet.
+        sans: ['"Inter"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+      },
     },
   },
   plugins: [],

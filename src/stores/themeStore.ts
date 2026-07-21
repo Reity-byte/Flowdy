@@ -21,7 +21,7 @@ interface ThemeState {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      activeTheme: "pink", // Výchozí téma
+      activeTheme: "dark", // Výchozí téma — profesionální/neutrální, růžová zůstává volitelná
       customColors: {
         bg: "#1e1e2e",
         panel: "#181825",

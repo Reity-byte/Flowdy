@@ -1,17 +1,23 @@
 import React, { useEffect, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { Plus } from "lucide-react";
 import { useAppStore } from "../stores/appStore";
+import { Button } from "./Button";
 
 export function Gallery() {
   const openEditor = useAppStore((s) => s.openEditor);
   const savedProjects = useAppStore((s) => s.savedProjects);
   const fetchProjects = useAppStore((s) => s.fetchProjects);
   const toggleNewCanvasPopup = useAppStore((s) => s.toggleNewCanvasPopup);
-  
+
   const [contextMenu, setContextMenu] = useState<{x: number, y: number, id: string, name: string} | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   useEffect(() => {
     void fetchProjects();
-    
+
     // Close menu when clicking anywhere else
     const handleClick = () => setContextMenu(null);
     window.addEventListener("click", handleClick);
@@ -25,20 +31,34 @@ export function Gallery() {
 
   const handleRename = () => {
     if (!contextMenu) return;
-    const newName = window.prompt("Rename project:", contextMenu.name);
-    if (newName && newName.trim() !== "") {
-      void useAppStore.getState().renameProject(contextMenu.id, newName.trim());
+    setRenameTarget({ id: contextMenu.id, name: contextMenu.name });
+    setRenameValue(contextMenu.name);
+  };
+
+  const submitRename = () => {
+    if (!renameTarget) return;
+    const trimmed = renameValue.trim();
+    if (trimmed !== "") {
+      void useAppStore.getState().renameProject(renameTarget.id, trimmed);
     }
+    setRenameTarget(null);
   };
 
   const handleDelete = async () => {
     if (!contextMenu) return;
-    
-    // Tauri/Browser potvrzení
-    const confirmed = window.confirm(`Opravdu chcete smazat "${contextMenu.name}"?`);
-    
+    const { id, name } = contextMenu;
+
+    // window.confirm can be a no-op inside Tauri's webviews on some
+    // platforms (and the native dialog plugin only works inside Tauri).
+    const confirmed = isTauri()
+      ? await ask(`Really delete "${name}"? This cannot be undone.`, {
+          title: "Delete Artwork",
+          kind: "warning",
+        })
+      : window.confirm(`Really delete "${name}"? This cannot be undone.`);
+
     if (confirmed) {
-      await useAppStore.getState().deleteProject(contextMenu.id);
+      await useAppStore.getState().deleteProject(id);
       setContextMenu(null);
     }
   };
@@ -51,19 +71,19 @@ export function Gallery() {
 
       <main className="flex-1 overflow-y-auto p-8">
         <div className="grid grid-cols-2 gap-6 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          
+
           <button
             onClick={() => toggleNewCanvasPopup(true)}
             className="group flex aspect-[4/3] cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-shell-border bg-shell-bg transition hover:border-shell-accent hover:bg-slate-800/50"
           >
             <div className="mb-2 rounded-full bg-shell-accent/20 p-3 text-shell-accent group-hover:bg-shell-accent group-hover:text-white transition">
-              <span className="text-2xl font-bold">+</span>
+              <Plus size={24} strokeWidth={2.25} />
             </div>
             <span className="font-medium text-slate-300 group-hover:text-white">New Canvas</span>
           </button>
 
           {savedProjects.map((project) => (
-            <div 
+            <div
                key={project.id}
                className="flex aspect-[4/3] cursor-pointer flex-col overflow-hidden rounded-xl border border-shell-border bg-shell-panel transition hover:ring-2 hover:ring-shell-accent"
                onClick={() => void openEditor(project.id)}
@@ -71,12 +91,12 @@ export function Gallery() {
             >
               <div className="flex-1 w-full bg-white flex items-center justify-center overflow-hidden">
                 {project.previewUrl ? (
-                  <img src={project.previewUrl} alt="Preview" className="w-full h-full object-cover" />
+                  <img src={project.previewUrl} alt="Preview" loading="lazy" className="w-full h-full object-cover" />
                 ) : (
                   <span className="text-slate-300 text-xs">No Preview</span>
                 )}
               </div>
-              <div className="w-full border-t border-shell-border bg-shell-panel p-3 text-left">
+              <div className="w-full border-t border-[color-mix(in_srgb,var(--shell-border),transparent_55%)] bg-shell-panel p-3 text-left">
                 <h3 className="truncate text-sm font-semibold text-white">{project.name}</h3>
               </div>
             </div>
@@ -87,16 +107,45 @@ export function Gallery() {
 
       {/* Custom Context Menu */}
       {contextMenu && (
-        <div 
+        <div
           className="fixed z-50 w-48 bg-shell-panel border border-shell-border rounded-lg shadow-2xl py-1 overflow-hidden"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
+          style={{
+            top: Math.min(contextMenu.y, window.innerHeight - 100),
+            left: Math.min(contextMenu.x, window.innerWidth - 200),
+          }}
         >
           <button onClick={handleRename} className="w-full text-left px-4 py-2 text-sm text-slate-200 hover:bg-shell-accent hover:text-white">
             Rename Artwork
           </button>
-          <button onClick={handleDelete} className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-red-500 hover:text-white border-t border-shell-border">
+          <button onClick={() => void handleDelete()} className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-red-500 hover:text-white border-t border-[color-mix(in_srgb,var(--shell-border),transparent_55%)]">
             Delete Artwork
           </button>
+        </div>
+      )}
+
+      {renameTarget && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-2xl border border-shell-border bg-shell-panel p-6 shadow-2xl">
+            <h2 className="mb-4 text-lg font-bold text-white">Rename Artwork</h2>
+            <input
+              autoFocus
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitRename();
+                else if (e.key === "Escape") setRenameTarget(null);
+              }}
+              className="w-full rounded-lg border border-shell-border bg-shell-bg px-3 py-2 text-white outline-none focus:border-shell-accent"
+            />
+            <div className="mt-4 flex gap-2">
+              <Button variant="secondary" onClick={() => setRenameTarget(null)} className="flex-1 py-2">
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={submitRename} className="flex-1 py-2 font-semibold">
+                Save
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

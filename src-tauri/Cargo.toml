@@ -1,12 +1,12 @@
 [package]
-name = "Flowdy"
+name = "flowdy"
 version = "0.1.0"
 description = "Digital illustration MVP"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "procreate_mvp_lib"
+name = "flowdy_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

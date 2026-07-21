@@ -23,7 +23,7 @@ type HistoryState = {
 export const useHistoryStore = create<HistoryState>((set, get) => ({
   past: [],
   future: [],
-  maxDepth: 48,
+  maxDepth: 20,
 
   pushCommittedState: (snap) => {
     set((s) => {
