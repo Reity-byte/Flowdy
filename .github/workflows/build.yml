@@ -140,6 +140,15 @@ jobs:
         # which needs no tag lookup and no "edit this release" call at all —
         # just the same "upload a release asset" endpoint tauri-action
         # itself already uses successfully for the desktop bundles.
+        #
+        # This release is a persistent draft reused across runs (same
+        # v__VERSION__ tag every time, per package.json), so a prior run's
+        # apk asset is often still attached under the same name — the
+        # upload-asset endpoint returns 422 ("already_exists") rather than
+        # overwriting it, which is what actually failed here. Delete any
+        # existing asset with the same name on this release first (look it
+        # up in the release's own asset list, not by guessing an ID), then
+        # upload fresh.
         if: startsWith(github.ref, 'refs/heads/main')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,6 +161,19 @@ jobs:
           fi
           find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | while read -r f; do
             name=$(basename "$f")
+
+            existing_id=$(curl -sSL -f \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
+              | jq -r --arg name "$name" '.[] | select(.name == $name) | .id' | head -n1)
+
+            if [ -n "$existing_id" ]; then
+              echo "Deleting existing asset $name (id $existing_id) before re-upload"
+              curl -sSL -f -X DELETE \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/$existing_id"
+            fi
+
             echo "Uploading $name to release $RELEASE_ID"
             curl -sSL -f -X POST \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
