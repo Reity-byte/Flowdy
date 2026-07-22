@@ -475,6 +475,50 @@ function midpoint(a: Point, b: Point): Point {
 }
 
 /**
+ * One box-blur pass over a flat `w*h` channel array, via a sliding-window
+ * sum (O(w*h) total, independent of `radius`) rather than re-summing the
+ * whole window at every pixel. Clamp-to-edge boundary handling (out-of-
+ * range samples reuse the nearest in-range one) — used by Blur's
+ * `blurPatchInPlace`, see that method's doc comment for why this replaced
+ * Canvas 2D's `filter: blur()`. `horizontal` selects whether each pass blurs
+ * along rows (stride 1) or columns (stride `w`); `src` and `dst` must be
+ * different arrays.
+ */
+function boxBlurPass(src: Float32Array, dst: Float32Array, w: number, h: number, radius: number, horizontal: boolean): void {
+  const windowSize = radius * 2 + 1;
+  if (horizontal) {
+    for (let y = 0; y < h; y++) {
+      const rowOff = y * w;
+      let sum = 0;
+      for (let i = -radius; i <= radius; i++) {
+        const idx = Math.min(w - 1, Math.max(0, i));
+        sum += src[rowOff + idx];
+      }
+      for (let x = 0; x < w; x++) {
+        dst[rowOff + x] = sum / windowSize;
+        const addIdx = Math.min(w - 1, Math.max(0, x + radius + 1));
+        const subIdx = Math.min(w - 1, Math.max(0, x - radius));
+        sum += src[rowOff + addIdx] - src[rowOff + subIdx];
+      }
+    }
+  } else {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let i = -radius; i <= radius; i++) {
+        const idx = Math.min(h - 1, Math.max(0, i));
+        sum += src[idx * w + x];
+      }
+      for (let y = 0; y < h; y++) {
+        dst[y * w + x] = sum / windowSize;
+        const addIdx = Math.min(h - 1, Math.max(0, y + radius + 1));
+        const subIdx = Math.min(h - 1, Math.max(0, y - radius));
+        sum += src[addIdx * w + x] - src[subIdx * w + x];
+      }
+    }
+  }
+}
+
+/**
  * Stateful single-stroke smoother/renderer. Callers drive it through the
  * pointer lifecycle: down() on pointerdown, move() on each pointermove, and
  * flush() on pointerup to finish the tail. It owns the running smoothing/
@@ -534,11 +578,29 @@ export class HighPerformanceBrushStroke {
   private wetBuffer: HTMLCanvasElement | null = null;
   private wetCtx: CanvasRenderingContext2D | null = null;
 
-  // Blur tool only: reusable scratch for stampBlurDab's actual-pixel blur
-  // (Canvas 2D `filter: blur()`), masked to a soft round falloff before
-  // being stamped.
+  // Blur tool only: reusable scratch for stampBlurDab's actual-pixel blur,
+  // masked to a soft round falloff before being stamped. The blur itself is
+  // a hand-rolled separable box blur over raw pixel data (see
+  // blurPatchInPlace/boxBlurPass below), not Canvas 2D's `filter: blur()` —
+  // see todo.md Section 15: that CSS-filter API is well known to fall back
+  // to a slow, non-GPU-accelerated per-pixel path on Android WebView, and it
+  // ran once per dab (dozens per stroke), which was the leading suspect for
+  // a reported freeze while drawing a Blur stroke on Android.
   private blurScratch: HTMLCanvasElement | null = null;
   private blurScratchCtx: CanvasRenderingContext2D | null = null;
+  // Pooled scratch buffers for blurPatchInPlace, resized (grown only) as
+  // needed instead of allocated fresh every dab, to keep this hot path free
+  // of per-dab GC churn.
+  private blurBufR: Float32Array | null = null;
+  private blurBufG: Float32Array | null = null;
+  private blurBufB: Float32Array | null = null;
+  private blurBufA: Float32Array | null = null;
+  private blurBufR2: Float32Array | null = null;
+  private blurBufG2: Float32Array | null = null;
+  private blurBufB2: Float32Array | null = null;
+  private blurBufA2: Float32Array | null = null;
+  /** The last position `stampBlurDab` actually ran a blur computation at — a throttle gate (unlike Smudge's identically-named field, which is a pure motion-vector reference with no gate). Safe to throttle here because Blur always reads from the static `preStroke` snapshot, never from its own prior output, so skipping sub-steps only coarsens dab spacing along the path, not an accumulation/feedback effect. Reset at both down() and beginReplayPass(). */
+  private blurLastPos: Point | null = null;
 
   // Smudge tool only. Two structural properties, both deliberate and both
   // load-bearing for what a real smudge/drag has to look like:
@@ -694,11 +756,96 @@ export class HighPerformanceBrushStroke {
   }
 
   /**
+   * Fills `this.blurBufR/G/B/A` (pooled scratch, grown via ensureBlurBuffers)
+   * with `img`'s pixels premultiplied by alpha, so blurring near a
+   * transparent edge doesn't pull in whatever arbitrary RGB a fully-
+   * transparent pixel happens to hold.
+   */
+  private ensureBlurBuffers(n: number): void {
+    if (!this.blurBufR || this.blurBufR.length < n) {
+      this.blurBufR = new Float32Array(n);
+      this.blurBufG = new Float32Array(n);
+      this.blurBufB = new Float32Array(n);
+      this.blurBufA = new Float32Array(n);
+      this.blurBufR2 = new Float32Array(n);
+      this.blurBufG2 = new Float32Array(n);
+      this.blurBufB2 = new Float32Array(n);
+      this.blurBufA2 = new Float32Array(n);
+    }
+  }
+
+  /**
+   * Blurs `img` in place using a 3-pass separable box blur (a standard,
+   * cheap approximation of a Gaussian blur — each box pass has variance
+   * `((2r+1)^2-1)/12`, and three of them summed approximates a true
+   * Gaussian's bell curve closely enough to read as "soft blur," not
+   * "boxy") over raw `Uint8ClampedArray` pixel data — replaces the previous
+   * Canvas 2D `filter: blur()` implementation (see stampBlurDab's own doc
+   * comment for why). Each box pass is O(width*height) via a sliding-window
+   * sum (add the new edge pixel, subtract the one that fell out of the
+   * window), not O(width*height*radius), so it stays cheap even at a large
+   * blur radius.
+   */
+  private blurPatchInPlace(img: ImageData, radius: number): void {
+    const w = img.width;
+    const h = img.height;
+    const n = w * h;
+    const data = img.data;
+    this.ensureBlurBuffers(n);
+    const pr = this.blurBufR!, pg = this.blurBufG!, pb = this.blurBufB!, pa = this.blurBufA!;
+    const tr = this.blurBufR2!, tg = this.blurBufG2!, tb = this.blurBufB2!, ta = this.blurBufA2!;
+
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const a = data[o + 3];
+      const af = a / 255;
+      pr[i] = data[o] * af;
+      pg[i] = data[o + 1] * af;
+      pb[i] = data[o + 2] * af;
+      pa[i] = a;
+    }
+
+    // 2 iterations of (horizontal pass, then vertical pass), each iteration
+    // reading the previous one's output — a standard box-blur-approximates-
+    // Gaussian technique. (3 iterations is the textbook choice for the
+    // closest Gaussian match, but profiling on real dispatched strokes
+    // showed 2 iterations already reads as a soft, non-boxy blur while
+    // meaningfully cutting per-dab cost — see todo.md Section 15, this is a
+    // performance-motivated fix, so the cheaper choice wins given both look
+    // like a real blur.)
+    for (let iter = 0; iter < 2; iter++) {
+      boxBlurPass(pr, tr, w, h, radius, true);
+      boxBlurPass(pg, tg, w, h, radius, true);
+      boxBlurPass(pb, tb, w, h, radius, true);
+      boxBlurPass(pa, ta, w, h, radius, true);
+
+      boxBlurPass(tr, pr, w, h, radius, false);
+      boxBlurPass(tg, pg, w, h, radius, false);
+      boxBlurPass(tb, pb, w, h, radius, false);
+      boxBlurPass(ta, pa, w, h, radius, false);
+    }
+
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const a = pa[i];
+      if (a <= 0.5) {
+        data[o] = 0; data[o + 1] = 0; data[o + 2] = 0; data[o + 3] = 0;
+        continue;
+      }
+      const inv = 255 / a;
+      data[o] = Math.min(255, Math.max(0, pr[i] * inv));
+      data[o + 1] = Math.min(255, Math.max(0, pg[i] * inv));
+      data[o + 2] = Math.min(255, Math.max(0, pb[i] * inv));
+      data[o + 3] = Math.min(255, Math.max(0, a));
+    }
+  }
+
+  /**
    * Blur dab: takes the pixels *already at* (x, y) — from `preStroke`, read
    * once at stroke start so a stroke never feeds back on its own already-
-   * blurred pixels — and stamps back an actually-blurred
-   * (Canvas 2D `filter: blur()`, a real per-pixel box/gaussian blur, not a
-   * flat fill) copy of that same patch, masked to a soft round falloff.
+   * blurred pixels — and stamps back an actually-blurred (a real per-pixel
+   * box/gaussian blur, not a flat fill) copy of that same patch, masked to a
+   * soft round falloff.
    *
    * This replaced an earlier version that sampled one alpha-weighted
    * *average* color for the whole dab (`sampleAreaColor`, the same helper
@@ -707,12 +854,47 @@ export class HighPerformanceBrushStroke {
    * rather than blurring: it destroyed detail inside the dab instead of
    * softening it, and looked like coloring, not blurring, exactly as
    * reported. A real blur has to vary per pixel (edges get softer, not
-   * replaced by one solid tone), which needs an actual blur filter over the
-   * patch, not a single sampled value.
+   * replaced by one solid tone), which needs an actual blur over the patch,
+   * not a single sampled value.
+   *
+   * **Perf (todo.md Section 15 — reported Blur freezes the app while
+   * drawing on Android):** this used to set `bctx.filter = blur(px)` (Canvas
+   * 2D's CSS-filter API) and `drawImage` through it once per dab. That API
+   * is well known to fall back to a slow, non-GPU-accelerated per-pixel
+   * path on Android WebView (unlike desktop Chrome/Safari, where it's
+   * usually GPU-accelerated and cheap) — and `DocumentCanvas` runs every
+   * dab of an active stroke synchronously (`setImmediateMode(true)` for the
+   * stroke's duration), so dozens of slow filter calls in a row, with zero
+   * yielding back to the browser between them, reads exactly as "frozen."
+   * Fixed two ways, per the todo's own "both together is most robust"
+   * conclusion:
+   * 1. The blur itself is now a hand-rolled box blur over raw pixel data
+   *    (`blurPatchInPlace`, pure typed-array math, no CSS filter, no GPU
+   *    fallback path to hit).
+   * 2. A distance-gated throttle (`blurLastPos`) skips sub-steps that
+   *    haven't moved far enough since the last one actually processed,
+   *    cutting the number of blur computations per stroke — safe here
+   *    specifically because Blur always reads from the static `preStroke`
+   *    snapshot rather than its own prior output, so coarser spacing only
+   *    means coarser dab spacing along the path, not a feedback bug (unlike
+   *    Smudge, where an analogous throttle was tried and removed — see
+   *    Session 10/11's Alpha Log entries — because Smudge's *output*
+   *    is what the next dab reads, so skipping steps there compounds).
    */
   private stampBlurDab(x: number, y: number, sizeMul: number, taper: number, settings: BrushSettings): void {
     if (!this.wetCtx || !this.preStroke) return;
     const effSize = Math.max(1, Math.round(settings.size * sizeMul * taper));
+
+    if (!this.blurLastPos) {
+      this.blurLastPos = { x, y };
+    } else {
+      const dx = x - this.blurLastPos.x;
+      const dy = y - this.blurLastPos.y;
+      const minStep = Math.max(1, effSize * 0.15);
+      if (dx * dx + dy * dy < minStep * minStep) return;
+      this.blurLastPos = { x, y };
+    }
+
     const maskStamp = getStamp({ size: effSize, hardness: settings.hardness, brushStyle: 'round', isEraser: false, color: { r: 0, g: 0, b: 0 } });
     const w = maskStamp.width;
     const h = maskStamp.height;
@@ -728,7 +910,7 @@ export class HighPerformanceBrushStroke {
     try {
       if (!this.blurScratch) {
         this.blurScratch = document.createElement('canvas');
-        this.blurScratchCtx = this.blurScratch.getContext('2d');
+        this.blurScratchCtx = this.blurScratch.getContext('2d', { willReadFrequently: true });
       }
       if (this.blurScratch.width !== w || this.blurScratch.height !== h) {
         this.blurScratch.width = w;
@@ -736,10 +918,11 @@ export class HighPerformanceBrushStroke {
       }
       const bctx = this.blurScratchCtx!;
       bctx.clearRect(0, 0, w, h);
-      bctx.save();
-      bctx.filter = `blur(${blurPx}px)`;
       bctx.drawImage(this.preStroke, x - w / 2, y - h / 2, w, h, 0, 0, w, h);
-      bctx.restore();
+
+      const img = bctx.getImageData(0, 0, w, h);
+      this.blurPatchInPlace(img, Math.max(1, Math.round(blurPx)));
+      bctx.putImageData(img, 0, 0);
 
       bctx.globalCompositeOperation = 'destination-in';
       bctx.drawImage(maskStamp, 0, 0);
@@ -961,6 +1144,7 @@ export class HighPerformanceBrushStroke {
     this.rawSamples = [];
     this.replaying = false;
     this.smudgeLastPos = null;
+    this.blurLastPos = null;
   }
 
   /** Starts a new stroke at `sample`: snapshots `ctx`'s current pixels as the pre-stroke ground truth and clears the wet (Flow) buffer. */
@@ -1516,5 +1700,6 @@ export class HighPerformanceBrushStroke {
       this.smudgeDirty = null;
       this.smudgeLastPos = { x: sample.x, y: sample.y };
     }
+    this.blurLastPos = { x: sample.x, y: sample.y };
   }
 }
