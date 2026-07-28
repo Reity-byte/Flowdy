@@ -1,5 +1,5 @@
 // src/lib/db.ts
-import type { LayerMeta } from "../stores/layerStore";
+import type { LayerMeta, FolderMeta } from "../stores/layerStore";
 import type { DocumentSnapshot } from "../stores/historyStore";
 
 const DB_NAME = "ProCreateDB"; // Legacy name — renaming requires an IndexedDB migration, so it's left as-is.
@@ -10,6 +10,8 @@ export type Project = {
   name: string;
   previewUrl: string;
   layers: LayerMeta[];
+  /** Optional — projects saved before layer folders existed have no `folders` field at all; always default it to `[]` when loading (never leave it `undefined`), not just when reading `layer.folderId`. */
+  folders?: FolderMeta[];
   snapshot: DocumentSnapshot;
   width: number;
   height: number;

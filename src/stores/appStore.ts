@@ -85,6 +85,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (proj) {
         useLayerStore.setState({
           layers: proj.layers,
+          folders: proj.folders ?? [],
           activeLayerId: proj.layers[0]?.id || null
         });
         set({
@@ -100,6 +101,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newLayerId = "layer_" + Date.now();
       useLayerStore.setState({
         layers: [{ id: newLayerId, name: "Layer 1", visible: true }],
+        folders: [],
         activeLayerId: newLayerId
       });
       useHistoryStore.setState({ past: [], future: [] });
@@ -123,6 +125,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     dc.commitActiveSelection();
 
     const layers = useLayerStore.getState().layers;
+    const folders = useLayerStore.getState().folders;
     const snapshot = dc.captureSnapshot();
     const previewUrl = dc.compositeToDataURL();
 
@@ -137,6 +140,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       name,
       previewUrl,
       layers,
+      folders,
       snapshot,
       width: state.canvasWidth,
       height: state.canvasHeight

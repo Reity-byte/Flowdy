@@ -12,7 +12,9 @@ import { useLayerStore, type LayerMeta } from "../stores/layerStore";
 import { brushSettingsForTool, HighPerformanceBrushStroke, flushDrawQueue, setImmediateMode } from "./brushEngine";
 import { SelectionManager } from "./SelectionManager";
 import { RulerManager } from "./RulerManager";
+import { TransformManager } from "./TransformManager";
 import { floodFillCanvas } from "./floodFill";
+import { whiteToTransparentGrayscale, whiteToTransparentColor, recolorByAlpha } from "./layerFilters";
 import { hexToRgb } from "../lib/color";
 import type { BrushSettings, Point, PointerBrushSample } from "./brushTypes";
 
@@ -59,6 +61,13 @@ function updateCanvasTexture(sprite: Sprite): void {
   try { (sprite.texture.source as any).update(); } catch {}
 }
 
+/** Whether a keyboard event's target is somewhere the user is typing text (an input/textarea, or a contenteditable element) — global shortcuts like Ctrl+Z or Delete must not fire there, both because those keys can be ordinary input and because e.g. Ctrl+Z has its own native "undo this text edit" meaning inside a focused field. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return true;
+  return target.isContentEditable;
+}
+
 export class DocumentCanvas {
   private host: HTMLElement;
   private app: Application | null = null;
@@ -79,6 +88,7 @@ export class DocumentCanvas {
   private brush = new HighPerformanceBrushStroke();
   private selection = new SelectionManager();
   private ruler = new RulerManager();
+  private transform = new TransformManager();
   private spaceHeld = false;
   private panning = false;
   private panPointerStart = { x: 0, y: 0 };
@@ -107,6 +117,8 @@ export class DocumentCanvas {
   private pinchStartPositions = new Map<number, { x: number, y: number }>();
   private unsubEditorTool: (() => void) | null = null;
   private unsubRulerSync: (() => void) | null = null;
+  /** Set by `startTransformForFolder` right before it flips `tool` to "transform", so the tool-switch subscription knows to target that folder instead of the default (active layer/selection) behavior — see the subscription's own comment. */
+  private pendingFolderTransformId: string | null = null;
 
   // --- SELECTION GESTURE STAV (ibis-Paint-style pinch/rotate on a floating
   // selection, redirected here instead of driving canvas zoom/pan/rotate) ---
@@ -121,11 +133,29 @@ export class DocumentCanvas {
     return { width: this.width, height: this.height };
   }
 
+  /** Set by `destroy()` — see `init()`'s own comment for why `init()` must re-check this after its `await` instead of assuming a call to `destroy()` can only ever happen after `init()` has already returned. */
+  private destroyed = false;
+
   constructor(host: HTMLElement) {
     this.host = host;
   }
 
-  /** Creates the PixiJS application, mounts it into `host`, and wires up pointer/keyboard/wheel handlers. Call once before any other method. */
+  /** Creates the PixiJS application, mounts it into `host`, and wires up pointer/keyboard/wheel handlers. Call once before any other method.
+   *
+   * React StrictMode (dev only) deliberately mounts effects twice — mount,
+   * cleanup, mount again — synchronously, well before this method's `await
+   * app.init(...)` below has had a chance to resolve. If `destroy()` (the
+   * effect's cleanup) runs during that gap, it correctly no-ops (nothing's
+   * been attached yet), but this method would otherwise carry on regardless
+   * once the await resolves — attaching window keydown/pointer listeners
+   * for an instance that's already supposed to be dead, with no cleanup
+   * left to ever remove them (the component's cleanup function already ran
+   * once and won't run again for this abandoned instance). Confirmed live:
+   * exactly this caused Ctrl+Z/Enter to fire multiple times per keypress
+   * after repeated mount cycles, each one calling `history.undo()`/etc.
+   * again on the same shared store. Re-checking `destroyed` right after the
+   * `await` and bailing out (tearing down the just-created app instead of
+   * finishing setup) closes the gap. */
   async init(): Promise<void> {
     this.width = useAppStore.getState().canvasWidth;
     this.height = useAppStore.getState().canvasHeight;
@@ -147,6 +177,14 @@ export class DocumentCanvas {
       // blend modes silently no-op (renders as if it were 'normal').
       useBackBuffer: true,
     });
+
+    if (this.destroyed) {
+      // destroy() already ran (see this method's own doc comment) while the
+      // above await was pending — tear down what was just created instead
+      // of continuing to attach listeners nothing will ever remove.
+      try { app.destroy(true, { children: true, texture: true }); } catch {}
+      return;
+    }
     this.app = app;
 
     // Zabraňuje zoomování prohlížeče při scrollování s Ctrl
@@ -158,9 +196,11 @@ export class DocumentCanvas {
     this.boardRoot.addChild(this.layerRoot);
     this.boardRoot.addChild(this.selection.container);
     this.boardRoot.addChild(this.ruler.container);
+    this.boardRoot.addChild(this.transform.container);
     this.world.addChild(this.boardRoot);
     app.stage.addChild(this.world);
     this.applyWorldTransform();
+    this.transform.bindRuntimeLookup((id) => this.runtimes.get(id));
 
     const canvas = app.canvas as HTMLCanvasElement;
     canvas.style.touchAction = "none";
@@ -183,6 +223,29 @@ export class DocumentCanvas {
       if (prevState.tool === "select" && state.tool !== "select") {
         this.commitActiveSelection();
       }
+      // Entering Transform starts a session automatically (selection-bound if
+      // one is active, otherwise the active layer's own content) — matches
+      // "tapping the tool" being the whole interaction, no separate "start"
+      // step. `startTransformForFolder` sets `pendingFolderTransformId`
+      // just before flipping `tool`, so a folder-targeted start (from the
+      // layer panel's "Transform Folder" button) takes priority over this
+      // default single-layer/selection behavior when both would otherwise
+      // fire on the same tick.
+      if (prevState.tool !== "transform" && state.tool === "transform") {
+        if (this.pendingFolderTransformId) {
+          const folderId = this.pendingFolderTransformId;
+          this.pendingFolderTransformId = null;
+          this.beginTransformForFolder(folderId);
+        } else {
+          this.beginTransformDefault();
+        }
+      }
+      // Leaving Transform bakes the current preview into real pixels — same
+      // "tool switch commits" convention as Select, and matches the spec's
+      // own "until Apply, or the tool is deselected/another tool chosen."
+      if (prevState.tool === "transform" && state.tool !== "transform") {
+        this.applyTransform();
+      }
     });
 
     // Ruler shape/enabled are plain store state (cheap, reactive UI toggles);
@@ -194,6 +257,15 @@ export class DocumentCanvas {
       }
       if (state.rulerEnabled !== prevState.rulerEnabled) {
         this.ruler.setEnabled(state.rulerEnabled, this.zoom);
+      }
+      // Same split as the ruler above — transformMode/meshDivisions are cheap
+      // reactive UI state the ToolPalette owns; the actual point-grid/gesture
+      // state lives engine-side in TransformManager.
+      if (state.transformMode !== prevState.transformMode) {
+        this.transform.setMode(state.transformMode, this.zoom);
+      }
+      if (state.meshDivisionsX !== prevState.meshDivisionsX || state.meshDivisionsY !== prevState.meshDivisionsY) {
+        this.transform.setDivisions(state.meshDivisionsX, state.meshDivisionsY, this.zoom);
       }
     });
   }
@@ -223,6 +295,22 @@ export class DocumentCanvas {
     } catch (e) {
       // ignore resize errors
     }
+  }
+
+  /**
+   * Forces one extra, immediate render pass of the whole stage. The actual
+   * cause of the "canvas frozen after Transform" bug was a too-aggressive
+   * `texture.destroy(true)` call in `TransformManager`'s teardown (see that
+   * file's `apply()` doc comment) — already fixed there. This is kept as a
+   * cheap, harmless belt-and-suspenders nudge after a Transform session ends
+   * (`applyTransform`/`cancelTransform`): safe to call because by this point
+   * the just-torn-down mesh is already gone from the scene graph, so it's
+   * just an ordinary extra re-render of a clean scene, the same thing the
+   * ticker would do on its own next tick anyway.
+   */
+  private forceRepaint(): void {
+    if (!this.app) return;
+    try { this.app.renderer.render(this.app.stage); } catch { /* best-effort */ }
   }
 
   // Merge the specified layer down into the layer below it (if any).
@@ -325,6 +413,9 @@ export class DocumentCanvas {
       if (src) this.blitAndDiscard(src, dst, 'flattenAll');
       useLayerStore.getState().deleteLayer(id);
     }
+    // Only one layer survives, so any folder's membership is now vacuous —
+    // clear them all rather than leaving empty ghost folders in the panel.
+    useLayerStore.setState({ folders: [] });
     this.syncLayers(useLayerStore.getState().layers);
     useLayerStore.getState().setActiveLayer(bottom.id);
     this.resetHistoryAfterStructuralChange();
@@ -332,6 +423,11 @@ export class DocumentCanvas {
 
   /** Tears down all listeners, the Pixi application, and layer runtimes. Call on unmount; the instance is unusable afterward. */
   destroy(): void {
+    // Set FIRST — see init()'s own comment: if init()'s `await app.init(...)`
+    // is still pending when this runs, this flag is how it finds out it
+    // should abort once that await resolves, instead of finishing setup for
+    // an instance that's already supposed to be dead.
+    this.destroyed = true;
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     document.removeEventListener("wheel", this.preventBrowserZoom);
@@ -374,6 +470,19 @@ export class DocumentCanvas {
       }
     }
 
+    // A folder is purely organizational (no opacity/blend mode of its own —
+    // see FolderMeta's doc comment), but hiding it must still hide every
+    // member's actual rendering. Computed here rather than baked into each
+    // layer's own stored `visible` flag, so toggling the folder back on
+    // restores each member's own prior visibility exactly, instead of
+    // clobbering it.
+    const folders = useLayerStore.getState().folders;
+    const isFolderVisible = (folderId?: string | null): boolean => {
+      if (!folderId) return true;
+      const f = folders.find((x) => x.id === folderId);
+      return f ? f.visible : true;
+    };
+
     this.layerRoot.removeChildren();
     // `metas` runs bottom-of-stack to top-of-stack (later entries render on top).
     // A run of consecutive clipped layers all clip to the same base — the
@@ -385,7 +494,7 @@ export class DocumentCanvas {
     for (const meta of metas) {
       const rt = this.runtimes.get(meta.id);
       if (!rt) continue;
-      rt.sprite.visible = meta.visible;
+      rt.sprite.visible = meta.visible && isFolderVisible(meta.folderId);
       rt.sprite.alpha = meta.opacity ?? 1;
       rt.sprite.blendMode = (meta.blendMode ?? "normal") as BLEND_MODES;
       this.layerRoot.addChild(rt.sprite);
@@ -397,6 +506,40 @@ export class DocumentCanvas {
         baseSprite = rt.sprite;
       }
     }
+  }
+
+  /**
+   * "Merge Folder": flattens every member of `folderId` into its bottom-most
+   * member (same underlying blit-and-discard mechanism as mergeLayerUp/Down/
+   * flattenAll), then removes the folder — its purpose (grouping several
+   * layers) no longer applies once they're one layer. A no-op-but-safe
+   * folder with 0-1 members just gets ungrouped (deleteFolder) with nothing
+   * to blit.
+   */
+  public mergeFolder(folderId: string): void {
+    const layers = useLayerStore.getState().layers;
+    const members = layers.filter((l) => l.folderId === folderId);
+    if (members.length < 2) {
+      useLayerStore.getState().deleteFolder(folderId);
+      return;
+    }
+
+    // `members` preserves `layers`' own bottom-to-top order (Array.filter
+    // keeps relative order), so members[0] is the bottom-most — the same
+    // "merge everything above down into the bottom one" shape flattenAll uses.
+    const bottom = members[0];
+    const dst = this.runtimes.get(bottom.id);
+    if (!dst) return;
+
+    for (let i = members.length - 1; i >= 1; i--) {
+      const src = this.runtimes.get(members[i].id);
+      if (src) this.blitAndDiscard(src, dst, 'mergeFolder');
+      useLayerStore.getState().deleteLayer(members[i].id);
+    }
+    useLayerStore.getState().deleteFolder(folderId);
+    this.syncLayers(useLayerStore.getState().layers);
+    useLayerStore.getState().setActiveLayer(bottom.id);
+    this.resetHistoryAfterStructuralChange();
   }
 
   /** Live-updates a layer's opacity without a full syncLayers pass (for smooth slider dragging). Store state is the source of truth for persistence; this just keeps the Pixi sprite in sync immediately. */
@@ -429,7 +572,37 @@ export class DocumentCanvas {
     useAppStore.getState().markDirty();
   }
 
-  /** Loads an image and adds it as a new layer, scaled (preserving aspect ratio) to fit within the artboard and centered. */
+  /** ibis Paint-style "White to Transparency" (grayscale variant) on the given layer — see layerFilters.ts's own doc comment for the exact formula. One-shot destructive action, recorded as a normal undo step. Takes an explicit `layerId` (not "whichever layer is active") to match every other per-layer panel action (duplicateLayer, mergeLayerUp/Down, etc.) — the panel can have a non-active layer's Properties open. */
+  public whiteToTransparentGrayscale(layerId: string): void {
+    const rt = this.runtimes.get(layerId);
+    if (!rt) return;
+    if (this.blockIfLayerLocked(layerId)) return;
+    whiteToTransparentGrayscale(rt.ctx);
+    updateCanvasTexture(rt.sprite);
+    this.onStrokeCommitted?.(layerId);
+  }
+
+  /** ibis Paint-style "White to Transparency" (color variant, strength 0-100) on the given layer — see layerFilters.ts's own doc comment (luminance-driven, not "distance from literal white" — a bright saturated color becomes semi-transparent too, not just near-white pixels). One-shot destructive action, recorded as a normal undo step. */
+  public whiteToTransparentColor(layerId: string, strength: number): void {
+    const rt = this.runtimes.get(layerId);
+    if (!rt) return;
+    if (this.blockIfLayerLocked(layerId)) return;
+    whiteToTransparentColor(rt.ctx, strength);
+    updateCanvasTexture(rt.sprite);
+    this.onStrokeCommitted?.(layerId);
+  }
+
+  /** ibis Paint's "Select Opacity" recolor: repaints the given layer's hue to `hexColor` while preserving each pixel's existing alpha exactly (see layerFilters.ts's own doc comment) — recolor lineart/strokes without losing their antialiased edges. One-shot destructive action, recorded as a normal undo step. */
+  public recolorLayerByAlpha(layerId: string, hexColor: string): void {
+    const rt = this.runtimes.get(layerId);
+    if (!rt) return;
+    if (this.blockIfLayerLocked(layerId)) return;
+    recolorByAlpha(rt.ctx, hexToRgb(hexColor));
+    updateCanvasTexture(rt.sprite);
+    this.onStrokeCommitted?.(layerId);
+  }
+
+  /** Loads an image and adds it as a new layer, scaled (preserving aspect ratio) to fit within the artboard and centered — then immediately drops the user into the Select tool's move/resize/rotate handles around exactly the placed image (not the whole layer/artboard), so repositioning or resizing it doesn't require manually switching to Select and marquee-dragging it by hand. */
   public async importImageAsLayer(dataUrl: string): Promise<void> {
     const img = new Image();
     await new Promise<void>((resolve, reject) => {
@@ -437,6 +610,12 @@ export class DocumentCanvas {
       img.onerror = () => reject(new Error("Failed to decode image"));
       img.src = dataUrl;
     });
+
+    // Bake in any selection floating on the CURRENTLY active layer before we
+    // switch layers below — selectRegion() assumes the ctx it's given is
+    // wherever a pending float actually belongs, and that's about to become
+    // the brand new image layer, not whatever was active a moment ago.
+    this.commitActiveSelection();
 
     if (!useLayerStore.getState().addLayer(this.width, this.height)) {
       useAppStore.getState().showNotification("Not enough memory for another layer");
@@ -457,6 +636,11 @@ export class DocumentCanvas {
     updateCanvasTexture(rt.sprite);
 
     useLayerStore.getState().renameLayer(newId, "Imported Image");
+
+    useEditorStore.getState().setTool("select");
+    this.selection.selectRegion(rt.ctx, { x: dx, y: dy, w: dw, h: dh }, this.zoom);
+    updateCanvasTexture(rt.sprite);
+
     useAppStore.getState().markDirty();
   }
 
@@ -489,6 +673,212 @@ export class DocumentCanvas {
     if (this.bakeFloatingSelection()) {
       this.onStrokeCommitted?.(useLayerStore.getState().activeLayerId ?? undefined);
     }
+  }
+
+  /**
+   * Delete/Backspace: clears a floating selection's content instead of
+   * pasting it back — matching typical raster-editor "delete selection"
+   * behavior. No new undo step is needed here: `startSelection`'s cut
+   * (`extractPixels`/`extractLassoPixels`) already cleared exactly the
+   * selection's own shape (not just its bounding box — the lasso path is
+   * respected there already) out of the real layer and recorded THAT as the
+   * undo step the moment the selection was made. The floating sprite this
+   * discards is only ever a preview of what committing would paste back;
+   * however far it's since been dragged/resized, the real layer's pixels
+   * have been sitting in their already-cleared state the whole time, so
+   * discarding it here doesn't change anything that hasn't already been
+   * recorded. Returns whether there was a selection to delete.
+   */
+  public deleteSelection(): boolean {
+    if (!this.selection.hasSelection) return false;
+    this.selection.discardFloatingSelection();
+    return true;
+  }
+
+  // --- Transform tool ------------------------------------------------------
+  //
+  // Entry points: entering the Transform tool (Toolbox click) auto-starts a
+  // session via `beginTransformDefault` (selection-bound if a selection is
+  // floating, otherwise the active layer's own content); the layer panel's
+  // "Transform Folder" button calls `startTransformForFolder` instead, which
+  // takes priority for that one tool-switch (see `pendingFolderTransformId`).
+  // Leaving the tool (or switching target while already in it) auto-applies.
+  //
+  // Known v1 limitations, deliberately scoped out rather than half-built:
+  // folder-targeting and an active selection are mutually exclusive (any
+  // floating selection is committed before a folder-transform starts, not
+  // combined with it); Cancel restores the original PIXELS exactly, but
+  // (unlike the full spec) does not re-instate the original selection
+  // afterward — the user is left with no active selection, same as if they'd
+  // committed it normally.
+
+  /** Full-canvas alpha scan for a layer's non-transparent content bounding box, padded — the "derive the transform box from actual content, not the whole canvas" requirement. One-shot cost (tool-entry only, not a hot path), same class of cost as Fill's own full-canvas getImageData. Returns null if the layer is fully transparent. */
+  private computeContentBounds(ctx: CanvasRenderingContext2D): { x: number; y: number; w: number; h: number } | null {
+    const w = ctx.canvas.width, h = ctx.canvas.height;
+    const data = ctx.getImageData(0, 0, w, h).data;
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for (let y = 0; y < h; y++) {
+      const rowOff = y * w;
+      for (let x = 0; x < w; x++) {
+        if (data[(rowOff + x) * 4 + 3] !== 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return null;
+    const pad = 20;
+    const x = Math.max(0, minX - pad);
+    const y = Math.max(0, minY - pad);
+    const x2 = Math.min(w, maxX + 1 + pad);
+    const y2 = Math.min(h, maxY + 1 + pad);
+    return { x, y, w: x2 - x, h: y2 - y };
+  }
+
+  /** Default Transform entry (Toolbox click): selection-bound if a selection is currently floating on the active layer, otherwise the active layer's own content bounds. */
+  private beginTransformDefault(): void {
+    const activeLayerId = useLayerStore.getState().activeLayerId;
+    if (!activeLayerId) return;
+    const rt = this.runtimes.get(activeLayerId);
+    if (!rt) return;
+    if (this.blockIfLayerLocked(activeLayerId)) return;
+
+    const floating = this.selection.takeFloatingContent();
+    if (floating) {
+      // The selection was already cut from this layer (its ctx already
+      // reflects the hole) — no NEW clear happens here, but the sprite's
+      // texture still needs a refresh in case anything changed it since.
+      this.transform.startFromExtracted(activeLayerId, floating.canvas, floating.rect, this.zoom, floating.rotation);
+      updateCanvasTexture(rt.sprite);
+      return;
+    }
+
+    const bounds = this.computeContentBounds(rt.ctx);
+    if (!bounds) {
+      useAppStore.getState().showNotification("Nothing to transform on this layer");
+      return;
+    }
+    // start() clears `bounds` from rt.ctx immediately (eager, non-destructive-
+    // until-cancel) — the sprite's GPU texture won't reflect that clear on
+    // its own, so it must be refreshed here or the stale (pre-clear) texture
+    // stays visible underneath the floating preview mesh.
+    this.transform.start([{ layerId: activeLayerId, canvas: rt.canvas, ctx: rt.ctx }], bounds, this.zoom);
+    updateCanvasTexture(rt.sprite);
+  }
+
+  /** Folder-targeted transform: the union of every non-locked member's own content bounds (hidden members included, per the agreed folder-scoping convention), applying the identical transform to each member's own content independently — relative positions between them are preserved because they all share the same underlying point grid. */
+  private beginTransformForFolder(folderId: string): void {
+    // Folder-targeting and an active selection are mutually exclusive in this
+    // version — commit any floating selection first rather than attempt to
+    // combine them (see this section's own doc comment).
+    this.commitActiveSelection();
+
+    const members = useLayerStore.getState().layers.filter((l) => l.folderId === folderId && !l.locked);
+    if (members.length === 0) {
+      useAppStore.getState().showNotification("Nothing to transform in this folder");
+      return;
+    }
+    let union: { x: number; y: number; w: number; h: number } | null = null;
+    const targets: { layerId: string; canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D }[] = [];
+    for (const l of members) {
+      const rt = this.runtimes.get(l.id);
+      if (!rt) continue;
+      const b = this.computeContentBounds(rt.ctx);
+      if (!b) continue;
+      targets.push({ layerId: l.id, canvas: rt.canvas, ctx: rt.ctx });
+      if (!union) {
+        union = { ...b };
+      } else {
+        const x2 = Math.max(union.x + union.w, b.x + b.w);
+        const y2 = Math.max(union.y + union.h, b.y + b.h);
+        union.x = Math.min(union.x, b.x);
+        union.y = Math.min(union.y, b.y);
+        union.w = x2 - union.x;
+        union.h = y2 - union.y;
+      }
+    }
+    if (!union || targets.length === 0) {
+      useAppStore.getState().showNotification("Nothing to transform in this folder");
+      return;
+    }
+    this.transform.start(targets, union, this.zoom);
+    // Same texture-refresh requirement as the single-layer path above, for
+    // every member layer start() just cleared.
+    for (const t of targets) {
+      const rt = this.runtimes.get(t.layerId);
+      if (rt) updateCanvasTexture(rt.sprite);
+    }
+  }
+
+  /** Public entry point for the layer panel's "Transform Folder" button. */
+  public startTransformForFolder(folderId: string): void {
+    if (useEditorStore.getState().tool === "transform") {
+      // Already in Transform for some other target — bake that one in first
+      // (same "switching away applies" convention as leaving the tool
+      // entirely), since setTool() below would no-op (already "transform")
+      // and never fire the subscription that would otherwise do this.
+      this.applyTransform();
+      this.beginTransformForFolder(folderId);
+    } else {
+      this.pendingFolderTransformId = folderId;
+      useEditorStore.getState().setTool("transform");
+    }
+  }
+
+  /** Whether a Transform session is currently active (preview floating, Apply/Cancel meaningful) — polled the same way `isSelectionActive()` already is, since this is engine-owned interaction state, not store state. */
+  public isTransformActive(): boolean {
+    return this.transform.active;
+  }
+
+  /**
+   * Bakes the current preview into real pixels (see `TransformManager.apply`'s
+   * own doc comment for exactly how) and records one undo step. If the
+   * Transform tool is still selected afterward (this wasn't triggered by
+   * switching to a different tool), immediately starts a fresh default
+   * session — matches "the tool always has something to transform while
+   * it's selected" rather than leaving a dead, handle-less Transform tool
+   * active until the user switches away and back.
+   *
+   * Ends with `forceRepaint()` — see that method's own doc comment for why:
+   * in short, tearing down a Transform session's mesh/texture can leave the
+   * VISIBLE canvas stuck on a stale frame even though the engine's own state
+   * is fully correct afterward, which is exactly the reported "overall I
+   * cant use the whole canvas after doin any changes."
+   */
+  public applyTransform(): void {
+    if (this.transform.active && this.app) {
+      const affected = this.transform.apply(this.app.renderer);
+      if (affected && affected.length) {
+        for (const id of affected) {
+          const rt = this.runtimes.get(id);
+          if (rt) updateCanvasTexture(rt.sprite);
+        }
+        useAppStore.getState().markDirty();
+        // More than one layer changed (a folder transform) — don't pass a
+        // single changedLayerId, or captureSnapshot's structural-sharing
+        // optimization would wrongly reuse a stale snapshot for the OTHER
+        // affected layers, assuming only the one passed in changed.
+        this.onStrokeCommitted?.(affected.length === 1 ? affected[0] : undefined);
+      }
+    }
+    if (useEditorStore.getState().tool === "transform") {
+      this.beginTransformDefault();
+    }
+    this.forceRepaint();
+  }
+
+  /** Discards the whole session, restoring every affected layer's original untouched pixels. Same auto-restart behavior as `applyTransform()` when the tool is still selected — see that method's own doc comment for why this also ends with `forceRepaint()`. */
+  public cancelTransform(): void {
+    if (this.transform.active) {
+      this.transform.cancel();
+      for (const rt of this.runtimes.values()) updateCanvasTexture(rt.sprite);
+    }
+    if (useEditorStore.getState().tool === "transform") {
+      this.beginTransformDefault();
+    }
+    this.forceRepaint();
   }
 
   // When `changedLayerId` is given, layers other than it reuse the ImageData
@@ -541,6 +931,41 @@ export class DocumentCanvas {
         console.error("Failed to restore layer data:", e);
       }
     }
+  }
+
+  /** Maps a layer's Pixi `BLEND_MODES` string to the Canvas2D `globalCompositeOperation` it visually matches. Most blend-mode names are identical between the two APIs (CSS `mix-blend-mode` and Canvas2D share a vocabulary); only "normal" and "add" need translating. */
+  private static blendModeToCanvasOp(mode: string): GlobalCompositeOperation {
+    if (mode === "normal") return "source-over";
+    if (mode === "add") return "lighter";
+    return mode as GlobalCompositeOperation;
+  }
+
+  /**
+   * Merges every visible layer onto one transparent-backed canvas, honoring
+   * opacity and blend mode — unlike `compositeToDataURL`/`exportAsBlob`
+   * (which only check `visible`, fine for a flattened *export* where there's
+   * nothing left to composite against, but not accurate enough here). Used
+   * by the Fill tool's "sample all layers" mode so a fill's boundary
+   * detection sees line art on a different layer the same way the eye does,
+   * even though the actual paint still only ever lands on the active layer
+   * (see `floodFillCanvas`'s `sampleImageData` param).
+   */
+  private compositeVisibleLayersForSampling(): ImageData {
+    const c = document.createElement("canvas");
+    c.width = this.width;
+    c.height = this.height;
+    const ctx = c.getContext("2d", { willReadFrequently: true })!;
+    for (const spr of this.layerRoot.children as Sprite[]) {
+      if (!spr.visible) continue;
+      const rt = [...this.runtimes.values()].find((r) => r.sprite === spr);
+      if (!rt) continue;
+      ctx.save();
+      ctx.globalAlpha = spr.alpha;
+      ctx.globalCompositeOperation = DocumentCanvas.blendModeToCanvasOp(spr.blendMode as string);
+      ctx.drawImage(rt.canvas, 0, 0);
+      ctx.restore();
+    }
+    return ctx.getImageData(0, 0, this.width, this.height);
   }
 
   // Used for the gallery preview thumbnail, so it's downscaled — a full-res
@@ -688,11 +1113,32 @@ export class DocumentCanvas {
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === "Space") this.spaceHeld = true;
-    
+
+    // None of the shortcuts below should fire while the user is typing
+    // somewhere else in the UI (a layer-rename box, a future numeric field,
+    // etc.) — both because "z"/"y" are ordinary letters someone might be
+    // typing, and because Ctrl/Cmd+Z has its own native meaning (undo the
+    // text edit) inside a focused text field that this must not clobber.
+    if (isEditableTarget(e.target)) return;
+
     // SHORTCUTS: Funguje pro Windows (Ctrl) i Mac (Cmd). Redo accepts both
     // Ctrl+Shift+Z and the Windows-standard Ctrl+Y.
-    const isZ = e.key.toLowerCase() === 'z' || e.code === 'KeyZ';
-    const isY = e.key.toLowerCase() === 'y' || e.code === 'KeyY';
+    //
+    // `e.key` ALONE, not `e.code` — on a QWERTZ layout (German/Czech/
+    // Austrian/Swiss keyboards) the Y and Z keys are physically swapped
+    // versus QWERTY, so `e.code` (which always reports the QWERTY REFERENCE
+    // position, not the printed key) reports 'KeyY' for the physical key
+    // printed "Z" and vice versa. The previous `e.key === 'z' || e.code ===
+    // 'KeyZ'` check OR'd both together, so pressing the physical "Z" key
+    // made `isZ` true via `e.key` AND `isY` true via `e.code` at the same
+    // time — every undo attempt also satisfied the redo condition, and redo
+    // was checked first, so undo could never win (reported bug: "ctrl+z and
+    // y both redirect to redo"). `e.key` alone already reflects the actual
+    // character the user's own layout produces, which is what a letter-based
+    // shortcut should key off in the first place.
+    const key = e.key.toLowerCase();
+    const isZ = key === 'z';
+    const isY = key === 'y';
     const isMod = e.ctrlKey || e.metaKey;
     const isRedo = isMod && ((isZ && e.shiftKey) || isY);
     const isUndo = isMod && isZ && !e.shiftKey;
@@ -710,6 +1156,13 @@ export class DocumentCanvas {
       if (this.selection.hasSelection) {
         this.selection.discardFloatingSelection();
       }
+      // Same reasoning for an in-progress Transform preview — it isn't part
+      // of any history snapshot either, so undo/redo must cancel (not apply)
+      // it first rather than leave it floating on top of a just-restored past
+      // state.
+      if (this.transform.active) {
+        this.cancelTransform();
+      }
 
       if (isRedo) {
         const snap = history.redo();
@@ -723,6 +1176,22 @@ export class DocumentCanvas {
           this.restoreSnapshot(snap);
           app.showNotification("Undo");
         }
+      }
+      return;
+    }
+
+    if ((e.key === "Delete" || e.key === "Backspace") && this.selection.hasSelection) {
+      e.preventDefault();
+      this.deleteSelection();
+    }
+
+    if (this.transform.active) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.applyTransform();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelTransform();
       }
     }
   };
@@ -804,22 +1273,30 @@ private onPointerDown = (e: PointerEvent): void => {
       return;
     }
 
+    if (tool === "transform") {
+      this.transform.beginDrag(world.x, world.y, this.zoom);
+      return;
+    }
+
     if (tool === "fill") {
       const ctx = this.getActiveCtx();
       if (!ctx) return;
+      const activeLayerId = useLayerStore.getState().activeLayerId;
+      if (this.blockIfLayerLocked(activeLayerId)) return;
       const px = Math.round(world.x);
       const py = Math.round(world.y);
-      const { color, fillTolerance } = useEditorStore.getState();
-      const activeLayerId = useLayerStore.getState().activeLayerId;
+      const { color, fillTolerance, fillSampleAllLayers } = useEditorStore.getState();
       const activeLayer = useLayerStore.getState().layers.find((l) => l.id === activeLayerId);
       const rgb = hexToRgb(color);
+      const sampleImageData = fillSampleAllLayers ? this.compositeVisibleLayersForSampling() : undefined;
       const filled = floodFillCanvas(
         ctx,
         px,
         py,
         { r: rgb.r, g: rgb.g, b: rgb.b, a: 255 },
         fillTolerance,
-        activeLayer?.alphaLocked ?? false
+        activeLayer?.alphaLocked ?? false,
+        sampleImageData
       );
       if (filled) {
         const rt = this.getActiveRuntime();
@@ -832,6 +1309,13 @@ private onPointerDown = (e: PointerEvent): void => {
     // VÝHYBKA PRO SELECT TOOL
     if (tool === "select") {
       const ctx = this.getActiveCtx();
+      // A locked layer can't have a NEW selection cut out of it (that's a
+      // pixel mutation — clearRect on the source). An already-floating
+      // selection (from before the layer got locked) can still be
+      // moved/resized/committed — narrow edge case, not worth blocking too.
+      if (!this.selection.hasSelection && this.blockIfLayerLocked(useLayerStore.getState().activeLayerId)) {
+        return;
+      }
       // Sync shape mode before starting; only matters for a fresh drag — a
       // handle-grab or move on an existing floating selection ignores it.
       this.selection.mode = useEditorStore.getState().selectMode;
@@ -851,6 +1335,7 @@ private onPointerDown = (e: PointerEvent): void => {
 
     const ctx = this.getActiveCtx();
     if (!ctx) return; // Pojistka, pokud není aktivní žádná vrstva
+    if (this.blockIfLayerLocked(useLayerStore.getState().activeLayerId)) return;
 
     this.drawing = true;
     this.stroking = true;
@@ -935,6 +1420,12 @@ private onPointerDown = (e: PointerEvent): void => {
     if (this.selection.isSelecting || this.selection.isMoving || this.selection.activeHandle) {
       const world = this.screenToWorld(e.clientX, e.clientY);
       this.selection.updateSelection(world.x, world.y, this.zoom, e.shiftKey);
+      return;
+    }
+
+    if (this.transform.isDragging()) {
+      const world = this.screenToWorld(e.clientX, e.clientY);
+      this.transform.updateDrag(world.x, world.y, this.zoom, e.shiftKey);
       return;
     }
 
@@ -1061,6 +1552,12 @@ private onPointerDown = (e: PointerEvent): void => {
       return;
     }
 
+    if (this.transform.isDragging()) {
+      this.transform.endDrag();
+      try { (this.app?.canvas as HTMLCanvasElement)?.releasePointerCapture(e.pointerId); } catch {}
+      return;
+    }
+
     // --- ZBYTEK FUNKCE PRO KRESLENÍ ZŮSTÁVÁ ---
     if (this.drawing) {
       // flush() does its own synchronous, final recomposite — drop any
@@ -1164,6 +1661,20 @@ private onPointerDown = (e: PointerEvent): void => {
     const id = useLayerStore.getState().activeLayerId;
     if (!id) return null;
     return this.runtimes.get(id) ?? null;
+  }
+
+  /**
+   * Full layer lock (`LayerMeta.locked`, distinct from Alpha Lock — see its
+   * own doc comment) blocks every pixel-mutating entry point: painting
+   * (brush/eraser/blur/smudge), Fill, starting a new Select cut, and the
+   * white-to-transparent/recolor-by-alpha layer actions. Shows a
+   * notification and returns true so callers can just `if (...) return;`.
+   */
+  private blockIfLayerLocked(id: string | null | undefined): boolean {
+    if (!id) return false;
+    const locked = !!useLayerStore.getState().layers.find((l) => l.id === id)?.locked;
+    if (locked) useAppStore.getState().showNotification("Layer is locked");
+    return locked;
   }
 
   /** Returns the picked hex color, "unsupported" if the browser lacks the EyeDropper API, or null if the user cancelled. */

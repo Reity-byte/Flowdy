@@ -1,5 +1,5 @@
 // src/engine/brushTypes.ts
-export type EditorTool = "brush" | "eraser" | "select" | "blur" | "smudge" | "fill" | "ruler";
+export type EditorTool = "brush" | "eraser" | "select" | "blur" | "smudge" | "fill" | "ruler" | "transform";
 export type BrushStyle = "round" | "pen" | "marker" | "textured" | "blur" | "smudge";
 
 export type BrushSettings = {

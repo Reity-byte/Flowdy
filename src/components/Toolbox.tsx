@@ -1,10 +1,11 @@
-import { Paintbrush, Eraser, MousePointer2, Square, Lasso, Droplet, Fingerprint, PaintBucket, Ruler, Slash, Circle, X } from "lucide-react";
+import { Paintbrush, Eraser, MousePointer2, Square, Lasso, Droplet, Fingerprint, PaintBucket, Ruler, Slash, Circle, X, Move } from "lucide-react";
 import { useEditorStore } from "../stores/editorStore";
+import { useUIStore } from "../stores/uiStore";
 import { documentEngineRef } from "../engine/documentEngineRef";
 import type { EditorTool } from "../engine/brushTypes";
 import { IconButton } from "./Button";
 
-const TOOLS: { id: EditorTool; icon: typeof Paintbrush; name: string }[] = [
+export const TOOLS: { id: EditorTool; icon: typeof Paintbrush; name: string }[] = [
   { id: "brush", icon: Paintbrush, name: "Brush" },
   { id: "eraser", icon: Eraser, name: "Eraser" },
   { id: "select", icon: MousePointer2, name: "Select" },
@@ -12,6 +13,7 @@ const TOOLS: { id: EditorTool; icon: typeof Paintbrush; name: string }[] = [
   { id: "smudge", icon: Fingerprint, name: "Smudge" },
   { id: "fill", icon: PaintBucket, name: "Fill" },
   { id: "ruler", icon: Ruler, name: "Ruler" },
+  { id: "transform", icon: Move, name: "Transform" },
 ];
 
 /** Always-visible vertical tool rail — one tap to switch tools, no overlay
@@ -26,6 +28,7 @@ export function Toolbox() {
   const setSelectMode = useEditorStore((s) => s.setSelectMode);
   const rulerType = useEditorStore((s) => s.rulerType);
   const setRulerType = useEditorStore((s) => s.setRulerType);
+  const toggleLeftOverlay = useUIStore((s) => s.toggleLeftOverlay);
 
   return (
     <div className="flex flex-col items-center gap-1.5">
@@ -34,7 +37,17 @@ export function Toolbox() {
           key={t.id}
           label={t.name}
           pressed={tool === t.id}
-          onClick={() => setTool(t.id)}
+          onClick={() => {
+            // Tapping the tool that's ALREADY active opens its settings sheet
+            // (tapping it again closes it — toggleLeftOverlay is itself a
+            // toggle) instead of just re-selecting a tool that's already
+            // selected, which used to be a no-op tap. Switching to a
+            // DIFFERENT tool is unchanged: select it, don't touch whatever
+            // the settings sheet is doing (if it happens to be open, it'll
+            // just start showing the newly-active tool's own settings).
+            if (tool === t.id) toggleLeftOverlay("brush");
+            else setTool(t.id);
+          }}
           className="h-11 w-11 p-0"
         >
           <t.icon size={20} strokeWidth={1.75} />

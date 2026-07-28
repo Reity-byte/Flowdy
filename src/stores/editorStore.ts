@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { EditorTool, BrushStyle } from "../engine/brushTypes";
 import type { RulerType } from "../engine/RulerManager";
+import type { TransformMode } from "../engine/TransformManager";
 
 export const BRUSH_PRESETS = {
   "fade-watercolor": { name: "Fade Watercolor (Mix)", style: "round" as BrushStyle, size: 50, hardness: 0.1, opacity: 0.8, intensity: 0.3, startTaper: 150, endTaper: 150, colorMix: 0.8, smudgeStrength: 0 },
@@ -50,6 +51,14 @@ type EditorState = ToolSettings & {
    * clicked seed pixel (0 = exact match only, 100 = fills everything) to be
    * swept into the same contiguous fill region. */
   fillTolerance: number;
+  /** Bucket/fill tool: ibis Paint's "reference: all layers" mode. When true,
+   * fill boundaries are read from the merged, visible-layers-composited
+   * image (so line art on a different layer is respected) instead of just
+   * the active layer's own pixels — but the actual color deposit still only
+   * ever lands on the active layer, exactly as it does when this is off.
+   * Defaults off so existing single-layer fill behavior doesn't silently
+   * change underfoot. */
+  fillSampleAllLayers: boolean;
 
   /** Drawing-guide (ruler) shape and whether it's currently constraining
    * strokes — the guide's actual placed geometry lives engine-side in
@@ -57,6 +66,15 @@ type EditorState = ToolSettings & {
    * how selection geometry is handled. */
   rulerType: RulerType;
   rulerEnabled: boolean;
+
+  /** Transform tool's active sub-mode and mesh subdivision (X/Y division
+   * count for Mesh mode) — reactive UI state the ToolPalette reads/writes,
+   * synced into `TransformManager` (the actual point-grid/gesture state)
+   * engine-side, same "cheap reactive toggle vs. engine-owned geometry"
+   * split as the ruler above. */
+  transformMode: TransformMode;
+  meshDivisionsX: number;
+  meshDivisionsY: number;
 
   setTool: (t: EditorTool) => void;
   setSelectMode: (m: SelectMode) => void;
@@ -72,8 +90,11 @@ type EditorState = ToolSettings & {
   setSmudgeStrength: (s: number) => void;
   setStabilization: (s: number) => void;
   setFillTolerance: (t: number) => void;
+  setFillSampleAllLayers: (v: boolean) => void;
   setRulerType: (t: RulerType) => void;
   setRulerEnabled: (e: boolean) => void;
+  setTransformMode: (m: TransformMode) => void;
+  setMeshDivisions: (x: number, y: number) => void;
 };
 
 const defaultBrush: ToolSettings = { activePresetId: "felt-tip", brushStyle: "pen", brushSize: 58, brushHardness: 1, brushOpacity: 1, intensity: 1, startTaper: 0, endTaper: 0, colorMix: 0, smudgeStrength: 0 };
@@ -101,8 +122,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // A middle-of-the-road default — some correction, not maximal.
   stabilization: 4,
   fillTolerance: 20,
+  fillSampleAllLayers: false,
   rulerType: "straight",
   rulerEnabled: true,
+  transformMode: "translate",
+  meshDivisionsX: 2,
+  meshDivisionsY: 2,
 
   setTool: (newTool) => {
     const s = get();
@@ -151,6 +176,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setSmudgeStrength: (smudgeStrength) => set({ smudgeStrength }),
   setStabilization: (stabilization) => set({ stabilization }),
   setFillTolerance: (fillTolerance) => set({ fillTolerance }),
+  setFillSampleAllLayers: (fillSampleAllLayers) => set({ fillSampleAllLayers }),
   setRulerType: (rulerType) => set({ rulerType }),
   setRulerEnabled: (rulerEnabled) => set({ rulerEnabled }),
+  setTransformMode: (transformMode) => set({ transformMode }),
+  setMeshDivisions: (meshDivisionsX, meshDivisionsY) => set({ meshDivisionsX, meshDivisionsY }),
 }));

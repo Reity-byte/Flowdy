@@ -15,7 +15,7 @@ import { TopBar } from "./components/TopBar";
 import { Gallery } from "./components/Gallery";
 import { NewCanvasModal } from "./components/NewCanvasModal";
 import { ExportModal } from "./components/ExportModal";
-import { Toolbox } from "./components/Toolbox";
+import { Toolbox, TOOLS } from "./components/Toolbox";
 import { OverlayPanel } from "./components/OverlayPanel";
 import { Button, IconButton } from "./components/Button";
 
@@ -35,6 +35,8 @@ export default function App() {
   const canvasHeight = useAppStore((s) => s.canvasHeight);
 
   const currentColor = useEditorStore((s) => s.color);
+  const activeTool = useEditorStore((s) => s.tool);
+  const activeToolName = TOOLS.find((t) => t.id === activeTool)?.name ?? "Tool";
   const leftOverlay = useUIStore((s) => s.leftOverlay);
   const rightOverlay = useUIStore((s) => s.rightOverlay);
   const toggleLeftOverlay = useUIStore((s) => s.toggleLeftOverlay);
@@ -137,22 +139,15 @@ export default function App() {
 
           <div className={`flex min-h-0 flex-1 p-4 overflow-hidden transition-all duration-500 ease-in-out ${isFocusMode ? 'gap-0' : 'gap-3'}`}>
 
-            {/* LEFT RAIL — always-visible tool switcher + Brush Settings toggle. Slim
-                (not a wide docked sidebar): switching tools is a one-tap action, so it
-                stays on the rail itself; only the heavier Brush Settings sheet opens
-                on demand as a floating OverlayPanel below. */}
+            {/* LEFT RAIL — always-visible tool switcher. Slim (not a wide docked
+                sidebar): switching tools is a one-tap action, so it stays on the
+                rail itself. Tapping a tool that's already active opens its own
+                settings sheet (see Toolbox.tsx) — there's no separate standalone
+                settings button anymore; tapping the active tool again is what
+                used to be this button's only job. */}
             <div className={`transition-all duration-500 ease-in-out overflow-hidden min-w-0 ${isFocusMode ? 'w-0 opacity-0' : 'w-16 opacity-100'}`}>
               <aside className="flex h-full w-16 shrink-0 flex-col items-center gap-1.5 overflow-y-auto custom-scrollbar rounded-xl border border-shell-border bg-shell-panel py-3 shadow-sm">
                 <Toolbox />
-                <div className="my-1 h-px w-8 bg-shell-border" />
-                <IconButton
-                  label="Brush Settings"
-                  pressed={leftOverlay === "brush"}
-                  onClick={() => toggleLeftOverlay("brush")}
-                  className="h-11 w-11 p-0"
-                >
-                  <SlidersHorizontal size={20} strokeWidth={1.75} />
-                </IconButton>
               </aside>
             </div>
 
@@ -166,7 +161,7 @@ export default function App() {
                 <CanvasStage />
 
                 {leftOverlay === "brush" && (
-                  <OverlayPanel icon={SlidersHorizontal} title="Brush Settings" side="left" onClose={() => toggleLeftOverlay("brush")}>
+                  <OverlayPanel icon={SlidersHorizontal} title={`${activeToolName} Settings`} side="left" onClose={() => toggleLeftOverlay("brush")}>
                     <ToolPalette />
                   </OverlayPanel>
                 )}

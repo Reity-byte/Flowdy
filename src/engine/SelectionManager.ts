@@ -304,6 +304,36 @@ export class SelectionManager {
     return false;
   }
 
+  /**
+   * Cuts `rect` (in the layer's own pixel coordinates) out of `ctx` into a
+   * new floating selection with move/resize/rotate handles already active —
+   * the same underlying cut/float/paste-back pipeline a rectangular marquee
+   * drag produces, without requiring the user to actually drag one. Used
+   * right after importing an image so it immediately gets transform handles
+   * (matching Procreate/ibis Paint's "insert photo") instead of landing as
+   * flat, already-baked pixels the user would otherwise have to marquee-
+   * select by hand just to move or resize.
+   *
+   * Any selection already floating is committed back into `ctx` first — the
+   * caller is responsible for `ctx` actually being wherever that pending
+   * float belongs (e.g. bake in any float on the OLD active layer via
+   * commitSelection/commitActiveSelection before switching layers, rather
+   * than relying on this call to do it against the wrong layer's context).
+   */
+  public selectRegion(ctx: CanvasRenderingContext2D, rect: { x: number, y: number, w: number, h: number }, zoom: number): void {
+    if (this.hasSelection) {
+      this.commitSelection(ctx);
+    }
+    this.mode = 'rect';
+    this.isSelecting = false;
+    this.isMoving = false;
+    this.activeHandle = null;
+    this.rotation = 0;
+    this.currentRect = { ...rect };
+    this.extractPixels(ctx);
+    this.draw(zoom);
+  }
+
   private extractPixels(ctx: CanvasRenderingContext2D) {
     // Normalizace před extrakcí — rounded to integers so tempCanvas pixel
     // dimensions exactly match the drawImage source rect (avoids subpixel
@@ -410,6 +440,35 @@ export class SelectionManager {
     this.floatingSprite.visible = true;
 
     this.hasSelection = true;
+  }
+
+  /**
+   * Hands ownership of the currently-floating selection to a caller (the
+   * Transform tool) instead of pasting it back into the layer — the
+   * selection's own UI (handles, "Done" button) disappears immediately,
+   * exactly as if it had been committed, but the caller receives the
+   * extracted content (already alpha-masked to the lasso outline, if that's
+   * how it was cut) and is responsible for it from here on. Returns null if
+   * there's no floating selection to take.
+   */
+  public takeFloatingContent(): { canvas: HTMLCanvasElement; rect: { x: number, y: number, w: number, h: number }; rotation: number } | null {
+    if (!this.hasSelection || !this.tempCanvas || !this.currentRect) return null;
+    const result = { canvas: this.tempCanvas, rect: { ...this.currentRect }, rotation: this.rotation };
+
+    const oldTexture = this.floatingSprite.texture;
+    if (oldTexture && oldTexture !== Texture.EMPTY) {
+      try { oldTexture.destroy(true); } catch {}
+    }
+    this.floatingSprite.texture = Texture.EMPTY;
+    this.floatingSprite.rotation = 0;
+    this.floatingSprite.visible = false;
+    this.graphics.clear();
+
+    this.hasSelection = false;
+    this.rotation = 0;
+    this.currentRect = null;
+    this.tempCanvas = null;
+    return result;
   }
 
   /** Pastes the floating selection back into `ctx` at its current position/size/rotation. Returns true if it actually committed anything. */

@@ -27,8 +27,19 @@ export function CanvasStage() {
     // own metadata, so `clippedToLayerBelow` must be part of the signature too
     // (unlike opacity/blendMode/alphaLocked, which are self-contained and use
     // their own live-update methods instead of a full syncLayers() pass).
-    const layerSignature = (layers: { id: string; visible: boolean; clippedToLayerBelow?: boolean }[]) =>
-      layers.map((l) => l.id + (l.visible ? "1" : "0") + (l.clippedToLayerBelow ? "1" : "0")).join("|");
+    // `folderId` is included too — grouping a layer doesn't move its own
+    // sprite, but changes to `layers`' own array order (dragging into/out of
+    // a folder always reorders the array to keep members contiguous) are
+    // already covered by the join order; folderId itself only matters
+    // combined with the folder's *own* visible flag, which is a separate,
+    // parallel signature below (folders are a different store slice — a
+    // folder's visibility flipping doesn't touch `layers` at all, so it
+    // can't be caught by this signature alone).
+    const layerSignature = (layers: { id: string; visible: boolean; clippedToLayerBelow?: boolean; folderId?: string | null }[]) =>
+      layers.map((l) => l.id + (l.visible ? "1" : "0") + (l.clippedToLayerBelow ? "1" : "0") + (l.folderId ?? "")).join("|");
+    let lastFolderSignature = "";
+    const folderSignature = (folders: { id: string; visible: boolean }[]) =>
+      folders.map((f) => f.id + (f.visible ? "1" : "0")).join("|");
 
     void dc.init().then(() => {
       // CRITICAL FIX: If user navigated away before init finished, destroy it!
@@ -39,6 +50,7 @@ export function CanvasStage() {
 
       const layers = useLayerStore.getState().layers;
       lastLayerSignature = layerSignature(layers);
+      lastFolderSignature = folderSignature(useLayerStore.getState().folders);
       dc.syncLayers(layers);
 
       const pendingData = useAppStore.getState().pendingLoadSnapshot;
@@ -57,8 +69,10 @@ export function CanvasStage() {
 
     const unsub = useLayerStore.subscribe((s) => {
       const sig = layerSignature(s.layers);
-      if (sig === lastLayerSignature) return;
+      const fsig = folderSignature(s.folders);
+      if (sig === lastLayerSignature && fsig === lastFolderSignature) return;
       lastLayerSignature = sig;
+      lastFolderSignature = fsig;
       documentEngineRef.current?.syncLayers(s.layers);
     });
 

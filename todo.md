@@ -7,14 +7,16 @@ before doing anything else — it should replace re-exploring the codebase.
 ## CURRENT PRIORITY — read this first
 
 Everything in Sections 1-15 below is historical (all done — see the Alpha Log).
-Session 17 fixed Section 15 (Blur-freezes-Android) and did a codebase-wide sweep
-for the same class of Android/desktop perf risk (CSS `filter:` usage, per-pointer-
-move getImageData/putImageData, recursive algorithms) — see the Alpha Log's
-Session 17 entry for what was found (only Blur had the issue) and what's still
-genuinely unverified (no Android device was available this session either — the
-fix is grounded in reasoning + desktop measurement, not an on-device confirmation).
-There is no other open item as of Session 17; if picked up again, start by reading
-the Session 17 Alpha Log entry, not by re-deriving from scratch.
+Session 18 built a large amount of new scope (image-import move/resize, Fill
+Sample-All-Layers, layer folders, per-layer Lock, White-to-Transparent x2,
+Select-Opacity recolor, the full Transform tool) and also root-caused and fixed
+the one bug it left open (the Translate-tool freeze) in a same-session follow-up
+— see the Alpha Log's Session 18 entry for the complete rundown, including the
+three distinct real bugs found in the Transform tool's apply/cancel path and
+exactly how each was fixed and verified live. There is no other open item as of
+Session 18; if picked up again, start by reading the Session 18 Alpha Log entry,
+not by re-deriving from scratch. `npx tsc --noEmit` clean and `npm test` 41/41
+passing as of the end of Session 18.
 
 ## Ground rules for whoever picks this up (read before touching anything)
 
@@ -84,6 +86,220 @@ behave) and visual polish, not more bug-hunting for its own sake.
 ---
 
 ## Alpha Log
+
+**Session 18 — 2026-07-28.** A long session covering several sequential
+feature requests, not a single planned scope — logged here as one entry since
+they landed back-to-back with no session break. Ends with one open,
+unresolved bug (see CURRENT PRIORITY above) that must be picked up first.
+
+- **Image-import move/resize without forcing Select, + Fill "Sample All
+  Layers"** (user ask: imported-image layers should be movable/resizable more
+  directly, and the bucket tool should be able to respect line art on other
+  layers without ever painting outside the active layer). Imported images now
+  auto-enter a Transform session against their own layer on import instead of
+  requiring the user to switch to Select first. Fill gained a
+  `fillSampleAllLayers` option (`src/stores/editorStore.ts`) — when on,
+  `floodFillCanvas` (`src/engine/floodFill.ts`) is given a composited
+  `sampleImageData` built from all visible layers to compute the fill
+  boundary, while the actual paint (`putImageData`) still only ever writes to
+  the active layer — mirrors the ibisPaint feature the user named explicitly:
+  boundaries respect other layers' line art, but nothing can accidentally
+  paint onto a layer other than the active one.
+- **Layer folders** (grouping, drag-and-drop, visibility, merge, rename) —
+  new scope, per the user's explicit request to add folder organization and
+  their answers to the pre-build questions: drag-and-drop layers into
+  folders, organizational only (no folder-level opacity/blend/clip
+  semantics), one level of folders only (no nested folders), and a "Merge
+  Folder" action that flattens a folder's contents into a single layer.
+  `src/stores/layerStore.ts` gained `FolderMeta`, `LayerMeta.folderId`, and
+  `addFolder`/`renameFolder`/`toggleFolderVisible`/`toggleFolderCollapsed`/
+  `deleteFolder`/`moveLayerTo`/`moveFolderTo`, all enforcing a folder-
+  contiguity invariant (every member of a folder stays adjacent in the flat
+  `layers` array — folders are a view over contiguous ranges, not a separate
+  tree). `LayerPanel.tsx` got folder rows with drag-and-drop, and the
+  layer/folder-visibility resync subscription in `CanvasStage.tsx` was fixed
+  so toggling a folder's visibility actually hides/shows its members on the
+  canvas. 6 new tests added to `layerStore.test.ts` (41/41 passing
+  throughout).
+- **Combined spec: Transform tool + keyboard fixes + tool-settings UX rework
+  + layer-panel additions.** The user gave one large combined ask; per their
+  own request, open questions were surfaced with `AskUserQuestion` before
+  building (quick fixes first; white-to-transparent and recolor as one-shot
+  destructive actions, not live filters; Transform is gesture-only for v1, no
+  numeric-entry fallback; Transform on a hidden layer/folder still includes
+  it, but a locked one is skipped). Recommended options were accepted for all
+  four.
+  - **Quick fixes:**
+    - Delete/Backspace now clears the active selection's content
+      (`DocumentCanvas.deleteSelection()`, using `SelectionManager`'s new
+      `takeFloatingContent()`), previously a no-op the user had flagged.
+    - Tool-settings UX rework: tapping the tool that's ALREADY active now
+      opens its settings sheet instead of being a no-op re-select; tapping a
+      different tool still just switches to it (`src/components/Toolbox.tsx`
+      `onClick` — `if (tool === t.id) toggleLeftOverlay("brush"); else
+      setTool(t.id);`). The standalone "Brush Settings" button in `App.tsx`
+      was removed since the tool rail now covers that.
+    - **Real bug found and fixed: Ctrl+Z and Ctrl+Y both triggered redo, no
+      undo available from either shortcut** (user-reported: "the backspace
+      logic worked and the new ux rework is great but the ctrl + z and y both
+      redirect me to redo? No undo just redo for both ctrl + y or z"). Root
+      cause: `DocumentCanvas.onKeyDown` compared both `e.key === 'z'` AND
+      `e.code === 'KeyZ'` — `e.code` reflects the QWERTY physical key
+      position regardless of the user's actual layout, so on a QWERTZ
+      keyboard (Y and Z swapped vs. QWERTY) the two checks collided and both
+      shortcuts resolved to the same branch. Fixed by comparing only on
+      `e.key.toLowerCase()` (`const key = e.key.toLowerCase(); const isZ =
+      key === 'z'; const isY = key === 'y';`), which reflects the character
+      the user's real layout actually produces. Verified via simulated
+      `{key:'z',code:'KeyY'}` and `{key:'y',code:'KeyZ'}` — undo and redo
+      each now fire correctly regardless of physical key position.
+  - **Layer panel additions:**
+    - Per-layer **Lock** (`LayerMeta.locked`, `toggleLayerLock` in
+      `layerStore.ts`) — distinct from the pre-existing Alpha Lock. Enforced
+      through a new `DocumentCanvas.blockIfLayerLocked(id)` helper, wired
+      into the paint/fill/select branches of `onPointerDown` so a locked
+      layer can't be painted, filled, or have its selection content moved.
+    - **White-to-Transparent**, two modes, both one-shot destructive
+      operations on the active layer (`src/engine/layerFilters.ts`, new
+      file): Grayscale mode (`whiteToTransparentGrayscale`) and Color mode
+      (`whiteToTransparentColor`, with a "strength" parameter).
+    - **Real bug found and fixed, from direct user feedback on behavior, not
+      a crash: White-to-Transparent (Color) only affected pixels close to
+      literal white** (user-reported: "It isnt supposed to only show up on
+      clear white surfaces but also on any collored other than black
+      surface. It should be semi transparent for every color except for
+      black ofc."). The original implementation measured distance from pure
+      white, so saturated colors (red, blue, etc.) were left fully opaque.
+      Rewrote it to use the same luminance formula as Grayscale mode while
+      preserving each pixel's hue — every pixel becomes more transparent the
+      darker it ISN'T (i.e. transparency scales with brightness, black stays
+      fully opaque, white goes fully transparent, and saturated mid-tones
+      land in between), and renamed the control from "tolerance" to
+      "strength" (default raised 10→100 to match the new semantics).
+      Verified pixel-exact after the fix: red → 179/255 alpha, blue → 226/255
+      alpha, black unchanged/opaque, white transparent.
+    - **Select Opacity** recolor (`recolorLayerByAlpha` in
+      `layerFilters.ts`) — one-shot recolor of the active layer to a chosen
+      hex color while preserving each pixel's existing alpha, exposed as a
+      "Recolor" button in `LayerPanel.tsx`.
+  - **Transform tool** (`src/engine/TransformManager.ts`, new file; wired
+    into `DocumentCanvas` and `ToolPalette.tsx`) — an ibisPaint-style
+    non-destructive transform with four sub-modes sharing one unified
+    point-grid model so they compose instead of resetting each other's work:
+    - **Translate** — drag to move.
+    - **Scale** — corner/edge handles, uniform or free depending on handle.
+    - **Perspective** — four independently-draggable corners, rendered with
+      Pixi's `PerspectiveMesh` (true GPU projective/homography transform).
+    - **Mesh** — a subdivided grid (`meshDivisionsX`/`meshDivisionsY` in
+      `editorStore.ts`) with per-vertex dragging, rendered with a custom
+      `MeshSimple` (hand-built vertex/UV/index buffers).
+    - Can target the active layer, an entire folder (`beginTransformForFolder`
+      / public `startTransformForFolder`), or the current selection's
+      floating content. Commits are baked into real pixel data via
+      `renderer.extract.canvas({target, frame})` — a live Pixi-rendered
+      preview extracted straight into the layer's real `ImageData`, not a
+      re-derived approximation.
+    - Enter applies, Escape cancels; `applyTransform()`/`cancelTransform()`
+      in `documentCanvas.ts` both auto-restart a fresh default Transform
+      session afterward if the active tool is still `"transform"` (so the
+      user can keep transforming without re-clicking the tool) — **this
+      auto-restart logic is the top suspect for the open bug below.**
+    - **Four real bugs found and fixed during this build, in order:**
+      1. **Bowtie/self-intersecting quad** — point storage was row-major but
+         `PerspectiveMesh`'s corner-setting API expects clockwise winding;
+         fixed with `cornerIndices()`/`cornerXY()` helpers that translate
+         between the two.
+      2. **Stale texture under the live preview** — `transform.start()`
+         cleared the real canvas pixels but never told Pixi to re-upload the
+         GPU texture, so old content stayed visible underneath the Transform
+         preview mesh; fixed by calling `updateCanvasTexture()` right after
+         `start()`.
+      3. **StrictMode dangling-listener bug**, found while investigating an
+         inflated undo-step count (`past:1, future:7` after a single
+         Ctrl+Z): `DocumentCanvas.init()` is async, and React 18 StrictMode's
+         dev-only double-mount left an orphaned first instance whose
+         `window` keydown listener got attached AFTER that instance's own
+         `destroy()` had already run — so it could never be removed, and
+         every dangling instance independently called `history.undo()`/
+         `redo()` on the shared store per keypress. Fixed with a `destroyed`
+         flag checked immediately after `await app.init()` resolves, before
+         attaching any listeners. Verified: exactly one undo-step consumed
+         per Ctrl+Z afterward (previously several).
+      4. **Pixi/WebGL extract-race crash** — `renderer.extract.canvas()`
+         threw `TypeError: Cannot read properties of null (reading '0')`
+         inside `BindGroup.setResource` whenever the target mesh hadn't yet
+         rendered in a normal frame (affects both `PerspectiveMesh` and
+         `MeshSimple`). Fixed with an unconditional offscreen `RenderTexture`
+         warmup render right before every extract call in
+         `TransformManager.apply()`. Verified via a deliberately-immediate
+         (no-delay) apply on both a mesh-mode session and a folder-targeted
+         session — no crash either time after the fix.
+  - **Reported by the user immediately after this build, in real usage —
+    root-caused and fixed in a same-session follow-up, once live reproduction
+    in the browser preview confirmed exactly what was happening:** the user
+    could not confirm any Translate change — Enter did nothing, the Apply
+    button did nothing, and the entire canvas stopped responding to input
+    afterward. Reproduced live (drag to translate → Apply → Apply again →
+    switch tools → try to paint) and found **three separate real bugs**,
+    all in the apply/cancel path, none of them the four bugs already fixed
+    above:
+    1. **`renderer.extract.canvas()` throws on a mesh that's never been
+       through a real Pixi frame** — reliably hit for a session created by
+       the auto-restart in `applyTransform()`/`cancelTransform()` (the very
+       next Apply/Cancel/tool-switch after ANY apply, since the auto-restart
+       creates a brand-new mesh in the same synchronous tick). Confirmed via
+       the exact same `BindGroup.setResource` "Cannot read properties of
+       null" stack trace the Session 18 Perspective/Mesh work already found
+       once (see bug #4 above) — except THIS time hitting it on the very
+       next interaction, not just immediately after creation. Fixed by (a)
+       giving Translate mode — the mode this bug was reported against — its
+       own unconditionally-safe path: baked by hand via plain Canvas2D
+       straight from the pristine pre-session snapshot
+       (`TransformManager.bakeTranslateViaCanvas2D`), never touching Pixi's
+       GPU extract at all; (b) for Scale/Perspective/Mesh, which genuinely
+       need the GPU, gating the extract call behind a new
+       `meshRenderConfirmed` flag (set true only after a real
+       `requestAnimationFrame` has elapsed since the mesh was created) and
+       falling back to restoring the pristine snapshot if extraction isn't
+       safe yet or fails anyway — same degraded-but-safe behavior as Cancel,
+       never a crash. `TransformManager.apply()` also now wraps everything
+       in try/catch with `teardown()` in a `finally`, so this manager can
+       never again be left `active` with a stuck preview mesh on screen.
+    2. **A previous fix attempt made things worse, not better:** forcing an
+       extra `renderer.render()` call ourselves to "warm up" an unready mesh
+       (this session's own first attempt at fixing bug #1) also throws the
+       same error, and — confirmed live — can leave the shared renderer
+       unable to produce correct frames afterward. Removed entirely; the
+       method never forces a render of its own anymore (see point 1(b)).
+    3. **The actual, confirmed root cause of "the whole canvas becomes
+       unusable" (found by isolating it independently of bug #1 — it
+       reproduced even in a pure-Translate session that never calls
+       `renderer.extract`/`renderer.render` at all):** `teardown()` called
+       `src.texture.destroy(true)`, cascading into destroying the transform
+       preview texture's underlying GPU resource. That single call left
+       Pixi's renderer unable to paint any further frames for the rest of
+       the session — the ticker kept reporting itself as running
+       (`ticker.started: true`, correct FPS) against an otherwise fully
+       correct, emptied scene graph, and new brush strokes kept landing
+       correctly in the real pixel data underneath, but the VISIBLE canvas
+       simply never updated again, with no error thrown anywhere. This is
+       what made Enter/Apply/Cancel and then painting all look like they
+       "did nothing" — they were working correctly the whole time; only the
+       display had silently stopped refreshing. Fixed by calling `destroy()`
+       with no argument instead of `destroy(true)` (Pixi's own default is
+       `destroySource: false`) — costs a small, bounded amount of GPU memory
+       per Transform session instead of an unrecoverable frozen renderer.
+       `DocumentCanvas.applyTransform()`/`cancelTransform()` also each gained
+       a `forceRepaint()` call (one extra, immediate, harmless re-render of
+       the whole stage) as a belt-and-suspenders nudge, though the `destroy()`
+       fix is what actually resolves the freeze.
+    - **Verified live in the browser preview**, repeatedly, on the exact
+      reported sequence (drag → Apply → Apply again → switch to Brush →
+      paint): the moved content bakes and displays correctly, no leftover
+      preview box, and new brush strokes appear immediately — matching a
+      fresh session with no Transform history at all.
+  - `npx tsc --noEmit` clean, `npm test` 41/41 passing throughout this
+    session (up from 35/35 at the start, from the 6 new folder tests).
 
 **Session 17 — 2026-07-22.** Picked up Section 15 (Blur freezes the app on
 Android while drawing a stroke) — the one open item left by Session 16 —

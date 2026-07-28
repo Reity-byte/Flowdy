@@ -12,6 +12,16 @@ export type FillColor = { r: number; g: number; b: number; a: number };
  * `respectAlphaLock` is true, only already-opaque pixels are eligible —
  * matching how Alpha Lock constrains brush painting elsewhere in the engine.
  * Returns whether anything was actually filled.
+ *
+ * `sampleImageData`, when given, is used INSTEAD of `ctx`'s own pixels for
+ * every boundary decision (the seed color and every neighbor's "does this
+ * match" check) — ibis Paint's "reference: all layers" fill mode, for
+ * exactly the annoyance it exists to fix: line art often lives on a
+ * different layer than the flat color you're filling onto, so filling
+ * against the active layer alone sees no boundary at all and floods the
+ * whole layer. The actual paint deposit and the Alpha Lock check both still
+ * always target `ctx` itself — only which layer's content COUNTS AS a
+ * boundary changes, never which layer gets painted.
  */
 export function floodFillCanvas(
   ctx: CanvasRenderingContext2D,
@@ -19,7 +29,8 @@ export function floodFillCanvas(
   startY: number,
   color: FillColor,
   tolerance: number,
-  respectAlphaLock: boolean
+  respectAlphaLock: boolean,
+  sampleImageData?: ImageData
 ): boolean {
   const width = ctx.canvas.width;
   const height = ctx.canvas.height;
@@ -30,29 +41,33 @@ export function floodFillCanvas(
   // Every "does this pixel match" check compares against the pixel's
   // ORIGINAL color, not the mutated output — otherwise a fill color close to
   // the seed color would let the fill leak past its own already-painted
-  // pixels as it goes, corrupting the region boundary.
-  const original = new Uint8ClampedArray(data);
+  // pixels as it goes, corrupting the region boundary. `active` is always
+  // this layer's own pre-fill pixels — used for the Alpha Lock gate (a
+  // property of the layer actually being painted) regardless of where
+  // boundary matching itself reads from.
+  const active = new Uint8ClampedArray(data);
+  const sample = sampleImageData ? sampleImageData.data : active;
 
   const idx = (x: number, y: number) => (y * width + x) * 4;
   const seedI = idx(startX, startY);
-  const seedR = original[seedI];
-  const seedG = original[seedI + 1];
-  const seedB = original[seedI + 2];
-  const seedA = original[seedI + 3];
+  const seedR = sample[seedI];
+  const seedG = sample[seedI + 1];
+  const seedB = sample[seedI + 2];
+  const seedA = sample[seedI + 3];
 
-  if (respectAlphaLock && seedA === 0) return false;
+  if (respectAlphaLock && active[seedI + 3] === 0) return false;
 
   // tolerance 0-100 -> sum-of-channel-abs-diff threshold (0-1020 max range).
   const tol = (Math.max(0, Math.min(100, tolerance)) / 100) * 1020;
 
   const matches = (x: number, y: number): boolean => {
     const i = idx(x, y);
-    if (respectAlphaLock && original[i + 3] === 0) return false;
+    if (respectAlphaLock && active[i + 3] === 0) return false;
     const d =
-      Math.abs(original[i] - seedR) +
-      Math.abs(original[i + 1] - seedG) +
-      Math.abs(original[i + 2] - seedB) +
-      Math.abs(original[i + 3] - seedA);
+      Math.abs(sample[i] - seedR) +
+      Math.abs(sample[i + 1] - seedG) +
+      Math.abs(sample[i + 2] - seedB) +
+      Math.abs(sample[i + 3] - seedA);
     return d <= tol;
   };
 
